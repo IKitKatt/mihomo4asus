@@ -2,11 +2,6 @@
 
 Minimal Mihomo runner for ASUSWRT-Merlin routers with Entware on USB.
 
-Thanks to:
-
-- [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) for the Mihomo core.
-- [Dr4tez/sing-box4asus](https://github.com/Dr4tez/sing-box4asus) for the original ASUSWRT-Merlin script approach.
-
 ## Install
 
 ```sh
@@ -194,6 +189,11 @@ mihomo exclude set 192.168.50.10
 ```
 
 Clear the exclude list:
+
+
+## Thanks to
+- [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) for the Mihomo core.
+- [Dr4tez/sing-box4asus](https://github.com/Dr4tez/sing-box4asus) for the original ASUSWRT-Merlin script approach.
 
 ```sh
 mihomo exclude clear
