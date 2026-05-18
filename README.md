@@ -1,6 +1,6 @@
 # mihomo4asus
 
-Minimal Mihomo runner for ASUSWRT-Merlin routers with Entware on USB.
+Minimal **Mihomo** runner for **ASUSWRT-Merlin** routers with **Entware** on USB.
 
 ## Install
 
