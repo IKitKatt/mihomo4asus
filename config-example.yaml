@@ -1,0 +1,94 @@
+# Minimal mihomo4asus config example.
+# Copy this file to /opt/root/mihomo/config/config.yaml and replace proxy placeholders.
+
+mode: rule
+log-level: info
+ipv6: false
+allow-lan: true
+unified-delay: true
+tcp-concurrent: true
+
+# TProxy port used by mihomo4asus iptables rules.
+tproxy-port: 7894
+
+# Zashboard / Clash API.
+# Open Zashboard after start:
+#   http://<router-ip>:9090/ui
+external-controller: 0.0.0.0:9090
+secret: "change-me"
+external-ui: ui
+external-ui-name: zashboard
+external-ui-url: "https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.zip"
+
+profile:
+  store-selected: true
+  store-fake-ip: false
+
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  ipv6: false
+  enhanced-mode: redir-host
+  use-hosts: true
+  default-nameserver:
+    - 1.1.1.1
+    - 8.8.8.8
+  nameserver:
+    - https://1.1.1.1/dns-query
+    - https://8.8.8.8/dns-query
+  proxy-server-nameserver:
+    - https://1.1.1.1/dns-query
+    - https://8.8.8.8/dns-query
+  direct-nameserver:
+    - 77.88.8.8
+    - 8.8.8.8
+
+proxies:
+  - name: DIRECT
+    type: direct
+    udp: true
+
+  # Replace this placeholder with your real outbound.
+  # You can add VLESS/VMess/Trojan/Shadowsocks/WireGuard nodes here.
+  - name: Proxy
+    type: vless
+    server: example.com
+    port: 443
+    uuid: 00000000-0000-0000-0000-000000000000
+    network: tcp
+    udp: true
+    tls: true
+    servername: example.com
+    client-fingerprint: chrome
+
+  - name: DNS-OUT
+    type: dns
+
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - Proxy
+      - DIRECT
+
+  - name: AUTO
+    type: url-test
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 100
+    lazy: true
+    proxies:
+      - Proxy
+
+rules:
+  - DST-PORT,53,DNS-OUT
+  - IP-CIDR,0.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,224.0.0.0/4,DIRECT,no-resolve
+  - IP-CIDR,240.0.0.0/4,DIRECT,no-resolve
+  - MATCH,PROXY
