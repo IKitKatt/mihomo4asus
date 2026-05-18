@@ -60,7 +60,6 @@ nano /opt/root/mihomo/config/config.yaml
 ```
 
 After editing the config, restart Mihomo:
-
 ```sh
 mihomo restart
 ```
@@ -68,55 +67,46 @@ mihomo restart
 ## Commands
 
 Open the interactive console menu:
-
 ```sh
 mihomo
 ```
 
 Install or reinstall the script and Mihomo core:
-
 ```sh
 mihomo install
 ```
 
 Start Mihomo, load kernel modules, apply iptables/ip rule/ip route rules, and register Merlin hook lines:
-
 ```sh
 mihomo start
 ```
 
 Stop Mihomo and remove routing rules:
-
 ```sh
 mihomo stop
 ```
 
 Restart Mihomo:
-
 ```sh
 mihomo restart
 ```
 
 Show current state, architecture, core path, version, and config path:
-
 ```sh
 mihomo status
 ```
 
 Check the latest Mihomo release. If a newer core exists, stop Mihomo, replace the core, and start it again:
-
 ```sh
 mihomo update
 ```
 
 Open interactive include/exclude IP setup:
-
 ```sh
 mihomo setup
 ```
 
 Remove Mihomo core, config folder, runtime files, hook lines, command symlink, and routing rules:
-
 ```sh
 mihomo uninstall
 ```
@@ -126,31 +116,26 @@ mihomo uninstall
 `include.list` stores client IP/CIDR values that should be routed through Mihomo. If `include.list` is empty, all LAN clients are routed through Mihomo by default.
 
 Show included clients:
-
 ```sh
 mihomo include show
 ```
 
 Add included clients:
-
 ```sh
 mihomo include add 192.168.50.20 192.168.50.32/28
 ```
 
 Delete included clients:
-
 ```sh
 mihomo include del 192.168.50.20
 ```
 
 Replace the whole include list:
-
 ```sh
 mihomo include set 192.168.50.20 192.168.50.30
 ```
 
 Clear the include list:
-
 ```sh
 mihomo include clear
 ```
@@ -158,36 +143,32 @@ mihomo include clear
 `exclude.list` stores client IP/CIDR values that should bypass Mihomo. It has priority over `include.list`.
 
 Show excluded clients:
-
 ```sh
 mihomo exclude show
 ```
 
 Add excluded clients:
-
 ```sh
 mihomo exclude add 192.168.50.10 192.168.50.32/28
 ```
 
 Delete excluded clients:
-
 ```sh
 mihomo exclude del 192.168.50.10
 ```
 
 Replace the whole exclude list:
-
 ```sh
 mihomo exclude set 192.168.50.10
 ```
 
 Clear the exclude list:
-
+```sh
+mihomo exclude clear
+```
 
 ## Thanks to
 - [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) for the Mihomo core.
 - [Dr4tez/sing-box4asus](https://github.com/Dr4tez/sing-box4asus) for the original ASUSWRT-Merlin script approach.
 
-```sh
-mihomo exclude clear
-```
+
