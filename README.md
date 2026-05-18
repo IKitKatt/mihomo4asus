@@ -135,5 +135,6 @@ mihomo exclude clear
 ## Thanks to
 - [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) for the Mihomo core.
 - [Dr4tez/sing-box4asus](https://github.com/Dr4tez/sing-box4asus) for the original ASUSWRT-Merlin script approach.
+- [Zephyruso/zashboard](https://github.com/Zephyruso/zashboard) for perfect dashboard
 
 
