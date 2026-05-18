@@ -1,0 +1,912 @@
+#!/bin/sh
+
+# Minimal Mihomo runner for ASUSWRT-Merlin + Entware.
+# Public commands: install, start, stop, restart, status, update, setup, include, exclude, uninstall.
+
+MIHOMO_SCRIPT_DEPTH="${MIHOMO_SCRIPT_DEPTH:-0}"
+MIHOMO_SCRIPT_DEPTH=$((MIHOMO_SCRIPT_DEPTH + 1))
+export MIHOMO_SCRIPT_DEPTH
+[ "$MIHOMO_SCRIPT_DEPTH" -lt 4 ] || { echo "ERROR: recursive mihomo script invocation"; exit 1; }
+
+MIHOMO_HOME="${MIHOMO_HOME:-/opt/root/mihomo}"
+ROOT_DIR="${ROOT_DIR:-/opt/root}"
+MIHOMO_BIN="${MIHOMO_BIN:-$MIHOMO_HOME/mihomo}"
+MIHOMO_REPO="${MIHOMO_REPO:-MetaCubeX/mihomo}"
+MIHOMO_API="${MIHOMO_API:-https://api.github.com/repos/$MIHOMO_REPO/releases/latest}"
+CONFIG_DIR="${CONFIG_DIR:-$MIHOMO_HOME/config}"
+RUN_DIR="${RUN_DIR:-$MIHOMO_HOME/run}"
+LOG_FILE="${LOG_FILE:-$MIHOMO_HOME/mihomo.log}"
+DOWNLOAD_DIR="${DOWNLOAD_DIR:-$MIHOMO_HOME/download}"
+
+SCRIPT_PATH="${SCRIPT_PATH:-/jffs/addons/mihomo/mihomo}"
+LN_PATH="${LN_PATH:-/opt/bin/mihomo}"
+NAT_SCRIPT="${NAT_SCRIPT:-/jffs/scripts/nat-start}"
+FW_SCRIPT="${FW_SCRIPT:-/jffs/scripts/firewall-start}"
+SS_SCRIPT="${SS_SCRIPT:-/jffs/scripts/services-start}"
+
+LAN_IF="${LAN_IF:-br0}"
+ROUTE_TABLE="${ROUTE_TABLE:-5554}"
+FW_MARK="${FW_MARK:-0x4d3c2b1b}"
+RULE_PRIORITY="${RULE_PRIORITY:-5354}"
+DEFAULT_TUN_IF="${DEFAULT_TUN_IF:-mihomo}"
+DNS_PORT="${DNS_PORT:-1053}"
+CONFIG_NAME="${CONFIG_NAME:-config.yaml}"
+EXCLUDE_FILE="${EXCLUDE_FILE:-$CONFIG_DIR/exclude.list}"
+INCLUDE_FILE="${INCLUDE_FILE:-$CONFIG_DIR/include.list}"
+
+TAG="mihomo-script"
+MANGLE_CHAIN="MIHOMO-MANGLE"
+NAT_CHAIN="MIHOMO-NAT"
+PID_FILE="$RUN_DIR/mihomo.pid"
+MODE_FILE="$RUN_DIR/mode"
+TUN_FILE="$RUN_DIR/tun_if"
+
+if [ -t 1 ]; then
+    RED="$(printf '\033[31m')"
+    GREEN="$(printf '\033[32m')"
+    YELLOW="$(printf '\033[33m')"
+    GRAY="$(printf '\033[37m')"
+    CYAN="$(printf '\033[36m')"
+    BOLD="$(printf '\033[1m')"
+    RESET="$(printf '\033[0m')"
+else
+    RED=""
+    GREEN=""
+    YELLOW=""
+    GRAY=""
+    CYAN=""
+    BOLD=""
+    RESET=""
+fi
+
+print_message() {
+    type="$1"
+    shift
+    color="$GRAY"
+    case "$type" in
+        SUCCESS) color="$GREEN" ;;
+        WARN) color="$YELLOW" ;;
+        ERROR) color="$RED" ;;
+        ACTION|LINK) color="$CYAN" ;;
+        INFO|*) color="$GRAY" ;;
+    esac
+    printf '%s[%s]%s %s\n' "$color" "$type" "$RESET" "$*"
+}
+
+log() {
+    print_message "INFO" "$1"
+    logger -t mihomo "$1"
+}
+
+get_uname() {
+    opt="$1"
+    if command -v uname >/dev/null 2>&1; then
+        uname "$opt"
+    elif [ -x /bin/uname ]; then
+        /bin/uname "$opt"
+    elif [ -x /usr/bin/uname ]; then
+        /usr/bin/uname "$opt"
+    elif [ -x /opt/bin/uname ]; then
+        /opt/bin/uname "$opt"
+    elif command -v busybox >/dev/null 2>&1; then
+        busybox uname "$opt"
+    elif [ -x /bin/busybox ]; then
+        /bin/busybox uname "$opt"
+    else
+        die "missing uname or busybox uname"
+    fi
+}
+
+die() {
+    print_message "ERROR" "$1"
+    logger -t mihomo "ERROR: $1"
+    exit 1
+}
+
+ensure_dirs() {
+    [ -d "$ROOT_DIR" ] || die "Entware root $ROOT_DIR is not available"
+    mkdir -p "$MIHOMO_HOME" "$CONFIG_DIR" "$RUN_DIR" || die "cannot create mihomo directories"
+}
+
+ensure_script_dirs() {
+    mkdir -p "$(dirname "$SCRIPT_PATH")" /jffs/scripts /jffs/configs || die "cannot create JFFS script directories"
+}
+
+config_file() {
+    if [ -f "$CONFIG_DIR/$CONFIG_NAME" ]; then
+        echo "$CONFIG_DIR/$CONFIG_NAME"
+    elif [ -f "$CONFIG_DIR/mihomo.yml" ]; then
+        echo "$CONFIG_DIR/mihomo.yml"
+    elif [ -f "$CONFIG_DIR/mihomo.yaml" ]; then
+        echo "$CONFIG_DIR/mihomo.yaml"
+    else
+        return 1
+    fi
+}
+
+is_running() {
+    if [ -f "$PID_FILE" ]; then
+        pid="$(cat "$PID_FILE" 2>/dev/null)"
+        [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && return 0
+    fi
+    ps | grep -v grep | grep -q "$MIHOMO_BIN"
+}
+
+mihomo_pids() {
+    if [ -f "$PID_FILE" ]; then
+        pid="$(cat "$PID_FILE" 2>/dev/null)"
+        [ -n "$pid" ] && echo "$pid"
+    fi
+    ps | grep -v grep | grep "$MIHOMO_BIN" | awk '{print $1}'
+}
+
+wait_stopped() {
+    timeout="$1"
+    while [ "$timeout" -gt 0 ]; do
+        is_running || return 0
+        sleep 1
+        timeout=$((timeout - 1))
+    done
+    return 1
+}
+
+yaml_value() {
+    key="$1"
+    file="$2"
+    awk -v key="$key" '
+        $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
+            sub("^[[:space:]]*" key ":[[:space:]]*", "")
+            sub("[[:space:]]#.*$", "")
+            gsub(/^["'\'' ]+|["'\'' ]+$/, "")
+            print
+            exit
+        }
+    ' "$file"
+}
+
+yaml_block_value() {
+    block="$1"
+    key="$2"
+    file="$3"
+    awk -v block="$block" -v key="$key" '
+        $0 ~ "^[[:space:]]*" block ":[[:space:]]*($|#)" { in_block=1; next }
+        in_block && $0 ~ "^[^[:space:]][^:]*:" { exit }
+        in_block && $0 ~ "^[[:space:]]+" key ":[[:space:]]*" {
+            sub("^[[:space:]]+" key ":[[:space:]]*", "")
+            sub("[[:space:]]#.*$", "")
+            gsub(/^["'\'' ]+|["'\'' ]+$/, "")
+            print
+            exit
+        }
+    ' "$file"
+}
+
+detect_mode() {
+    file="$1"
+    tun_enable="$(yaml_block_value tun enable "$file")"
+    tproxy_port="$(yaml_value tproxy-port "$file")"
+
+    if echo "$tun_enable" | grep -Eiq '^(true|1)$'; then
+        echo "tun"
+        return 0
+    fi
+    if echo "$tproxy_port" | grep -Eq '^[0-9]+$'; then
+        echo "tproxy"
+        return 0
+    fi
+
+    die "config must contain either tun.enable: true or tproxy-port"
+}
+
+detect_tun_if() {
+    file="$1"
+    tun_if="$(yaml_block_value tun device "$file")"
+    [ -n "$tun_if" ] || tun_if="$(yaml_block_value tun interface-name "$file")"
+    [ -n "$tun_if" ] || tun_if="$DEFAULT_TUN_IF"
+    echo "$tun_if"
+}
+
+detect_dns_port() {
+    file="$1"
+    listen="$(yaml_block_value dns listen "$file")"
+    port="$(echo "$listen" | awk -F: '{print $NF}' | awk '{print $1}')"
+    if echo "$port" | awk '/^[0-9]+$/ && $1 > 0 && $1 < 65536 { found=1 } END { exit found ? 0 : 1 }'; then
+        echo "$port"
+    else
+        echo "$DNS_PORT"
+    fi
+}
+
+cleanup_hooks() {
+    [ -f "$NAT_SCRIPT" ] && sed -i "/$TAG/d" "$NAT_SCRIPT"
+    [ -f "$FW_SCRIPT" ] && sed -i "/$TAG/d" "$FW_SCRIPT"
+    [ -f "$SS_SCRIPT" ] && sed -i "/$TAG/d" "$SS_SCRIPT"
+}
+
+append_hook_line() {
+    file="$1"
+    line="$2"
+    [ -f "$file" ] || { echo "#!/bin/sh" > "$file"; chmod 755 "$file"; }
+    grep -qF "$line" "$file" || echo "$line" >> "$file"
+}
+
+download_to_stdout() {
+    url="$1"
+    wget --quiet --header="Accept: application/vnd.github.v3+json" -O - "$url" 2>/dev/null || \
+        curl -fsSL "$url" 2>/dev/null
+}
+
+download_to_file() {
+    url="$1"
+    dst="$2"
+    wget -q -O "$dst" "$url" 2>/dev/null || \
+        curl -fsSL -o "$dst" "$url" 2>/dev/null
+}
+
+latest_version() {
+    download_to_stdout "$MIHOMO_API" | awk '
+        /"tag_name":/ {
+            tag=$0
+            gsub(/^.*"tag_name":[[:space:]]*"/, "", tag)
+            gsub(/".*$/, "", tag)
+            sub(/^v/, "", tag)
+            print tag
+            exit
+        }
+    '
+}
+
+current_version() {
+    [ -x "$MIHOMO_BIN" ] || return 1
+    "$MIHOMO_BIN" -v 2>/dev/null | awk '
+        {
+            for (i=1; i<=NF; i++) {
+                if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+/) {
+                    gsub(/^v/, "", $i)
+                    gsub(/[^0-9A-Za-z.+_-].*$/, "", $i)
+                    print $i
+                    exit
+                }
+            }
+        }
+    '
+}
+
+unpack_gz() {
+    src="$1"
+    dst="$2"
+    gzip -dc "$src" > "$dst" 2>/dev/null || \
+        gunzip -c "$src" > "$dst" 2>/dev/null || \
+        zcat "$src" > "$dst" 2>/dev/null
+}
+
+detect_asset_pattern() {
+    arch="$(get_uname -m)"
+    case "$arch" in
+        aarch64|arm64)
+            echo 'mihomo-linux-arm64-[^"]*\.gz'
+            ;;
+        armv7*|armv7l)
+            echo 'mihomo-linux-armv7-[^"]*\.gz'
+            ;;
+        *)
+            die "unsupported CPU architecture: $arch"
+            ;;
+    esac
+}
+
+latest_download_url() {
+    pattern="$(detect_asset_pattern)"
+    download_to_stdout "$MIHOMO_API" | awk -v pattern="$pattern" '
+        /"browser_download_url":/ {
+            url=$0
+            gsub(/^.*"browser_download_url":[[:space:]]*"/, "", url)
+            gsub(/".*$/, "", url)
+            if (url ~ pattern &&
+                url !~ /android/ &&
+                url !~ /freebsd/ &&
+                url !~ /darwin/ &&
+                url !~ /windows/ &&
+                url !~ /compatible/ &&
+                url !~ /go[0-9]+/) {
+                print url
+                exit
+            }
+        }
+    '
+}
+
+install_core() {
+    mkdir -p "$DOWNLOAD_DIR" || die "cannot create $DOWNLOAD_DIR"
+    url="$(latest_download_url)"
+    [ -n "$url" ] || die "cannot find suitable Mihomo release asset for $(get_uname -m)"
+
+    archive="$DOWNLOAD_DIR/mihomo.gz"
+    tmp_bin="$DOWNLOAD_DIR/mihomo"
+
+    log "downloading $url"
+    download_to_file "$url" "$archive" || die "download failed"
+    unpack_gz "$archive" "$tmp_bin" || die "cannot unpack $archive"
+    chmod 755 "$tmp_bin"
+    mv "$tmp_bin" "$MIHOMO_BIN" || die "cannot install $MIHOMO_BIN"
+    chmod 755 "$MIHOMO_BIN"
+    rm -f "$archive"
+}
+
+install_script() {
+    ensure_script_dirs
+    current="$0"
+    if [ "$current" = "$LN_PATH" ]; then
+        [ -f "$SCRIPT_PATH" ] || die "missing real script at $SCRIPT_PATH"
+        chmod 755 "$SCRIPT_PATH"
+    elif [ "$current" != "$SCRIPT_PATH" ]; then
+        cp "$current" "$SCRIPT_PATH" || die "cannot copy script to $SCRIPT_PATH"
+        chmod 755 "$SCRIPT_PATH"
+    else
+        chmod 755 "$SCRIPT_PATH"
+    fi
+    ensure_alias
+}
+
+ensure_alias() {
+    mkdir -p "$(dirname "$LN_PATH")" 2>/dev/null
+    mkdir -p /jffs/configs 2>/dev/null
+    rm -f "$LN_PATH" 2>/dev/null
+    ln -sf "$SCRIPT_PATH" "$LN_PATH" 2>/dev/null || log "cannot create $LN_PATH symlink"
+
+    profile_add="/jffs/configs/profile.add"
+    alias_line="alias mihomo='$SCRIPT_PATH'"
+    [ -f "$profile_add" ] || { echo "#!/bin/sh" > "$profile_add"; chmod 755 "$profile_add"; }
+    grep -qF "export PATH=/opt/bin:/opt/sbin:" "$profile_add" 2>/dev/null || echo 'export PATH=/opt/bin:/opt/sbin:$PATH' >> "$profile_add"
+    grep -qF "$alias_line" "$profile_add" 2>/dev/null || echo "$alias_line" >> "$profile_add"
+}
+
+install_hooks() {
+    ensure_script_dirs
+    ensure_alias
+    cleanup_hooks
+    append_hook_line "$SS_SCRIPT" "(sleep 45 && $SCRIPT_PATH start) & # $TAG"
+    append_hook_line "$NAT_SCRIPT" "(sleep 10 && $SCRIPT_PATH apply-rules) & # $TAG"
+    append_hook_line "$FW_SCRIPT" "(sleep 10 && $SCRIPT_PATH apply-rules) & # $TAG"
+}
+
+load_kernel_modules() {
+    mode="$1"
+    if [ "$mode" = "tun" ]; then
+        lsmod | grep -q "^tun " || modprobe tun 2>/dev/null
+    else
+        lsmod | grep -q "^xt_TPROXY " || modprobe xt_TPROXY 2>/dev/null
+    fi
+}
+
+flush_rules() {
+    tun_if="$DEFAULT_TUN_IF"
+    if [ -f "$TUN_FILE" ]; then
+        saved_tun_if="$(cat "$TUN_FILE" 2>/dev/null)"
+        [ -n "$saved_tun_if" ] && tun_if="$saved_tun_if"
+    else
+        cfg="$(config_file 2>/dev/null)"
+        [ -n "$cfg" ] && tun_if="$(detect_tun_if "$cfg")"
+        [ -n "$tun_if" ] || tun_if="$DEFAULT_TUN_IF"
+    fi
+
+    ip rule del fwmark "$FW_MARK" lookup "$ROUTE_TABLE" priority "$RULE_PRIORITY" 2>/dev/null
+    ip rule del fwmark "$FW_MARK" lookup "$ROUTE_TABLE" 2>/dev/null
+    ip route flush table "$ROUTE_TABLE" 2>/dev/null
+
+    iptables -t mangle -D PREROUTING -j "$MANGLE_CHAIN" 2>/dev/null
+    iptables -t mangle -F "$MANGLE_CHAIN" 2>/dev/null
+    iptables -t mangle -X "$MANGLE_CHAIN" 2>/dev/null
+
+    iptables -t nat -D PREROUTING -j "$NAT_CHAIN" 2>/dev/null
+    iptables -t nat -F "$NAT_CHAIN" 2>/dev/null
+    iptables -t nat -X "$NAT_CHAIN" 2>/dev/null
+
+    iptables -D FORWARD -i "$tun_if" -j ACCEPT 2>/dev/null
+    iptables -D FORWARD -o "$tun_if" -j ACCEPT 2>/dev/null
+    iptables -D INPUT -i "$tun_if" -j ACCEPT 2>/dev/null
+    iptables -D OUTPUT -o "$tun_if" -j ACCEPT 2>/dev/null
+}
+
+add_bypass_rules() {
+    chain="$1"
+    iptables -t mangle -A "$chain" -d 0.0.0.0/8 -j RETURN
+    iptables -t mangle -A "$chain" -d 10.0.0.0/8 -j RETURN
+    iptables -t mangle -A "$chain" -d 100.64.0.0/10 -j RETURN
+    iptables -t mangle -A "$chain" -d 127.0.0.0/8 -j RETURN
+    iptables -t mangle -A "$chain" -d 169.254.0.0/16 -j RETURN
+    iptables -t mangle -A "$chain" -d 172.16.0.0/12 -j RETURN
+    iptables -t mangle -A "$chain" -d 192.168.0.0/16 -j RETURN
+    iptables -t mangle -A "$chain" -d 224.0.0.0/4 -j RETURN
+    iptables -t mangle -A "$chain" -d 240.0.0.0/4 -j RETURN
+}
+
+add_exclude_rules() {
+    chain="$1"
+    [ -f "$EXCLUDE_FILE" ] || return 0
+    while IFS= read -r item || [ -n "$item" ]; do
+        item="$(echo "$item" | awk '{print $1}')"
+        case "$item" in
+            ""|\#*) continue ;;
+        esac
+        iptables -t mangle -A "$chain" -s "$item" -j RETURN
+    done < "$EXCLUDE_FILE"
+}
+
+list_items() {
+    file="$1"
+    [ -f "$file" ] || return 0
+    awk '
+        {
+            sub(/[[:space:]]#.*/, "")
+            item=$1
+            if (item != "" && item !~ /^#/) print item
+        }
+    ' "$file"
+}
+
+show_list() {
+    title="$1"
+    file="$2"
+    print_message "INFO" "$title"
+    if [ -n "$(list_items "$file")" ]; then
+        i=1
+        list_items "$file" | while read item; do
+            printf '  %s) %s\n' "$i" "$item"
+            i=$((i + 1))
+        done
+    else
+        printf '  %s\n' "list is empty"
+    fi
+    printf '  file: %s\n' "$file"
+}
+
+append_list_items() {
+    file="$1"
+    shift
+    touch "$file"
+    for item in "$@"; do
+        case "$item" in ""|\#*) continue ;; esac
+        grep -qxF "$item" "$file" 2>/dev/null || echo "$item" >> "$file"
+    done
+}
+
+delete_list_items() {
+    file="$1"
+    shift
+    [ -f "$file" ] || return 0
+    tmp="$RUN_DIR/list.tmp"
+    cp "$file" "$tmp"
+    for item in "$@"; do
+        awk -v item="$item" '$0 != item { print }' "$tmp" > "$tmp.new"
+        mv "$tmp.new" "$tmp"
+    done
+    mv "$tmp" "$file"
+}
+
+has_include_rules() {
+    [ -n "$(list_items "$INCLUDE_FILE")" ]
+}
+
+apply_mihomo_target() {
+    chain="$1"
+    mode="$2"
+    src="$3"
+    tproxy_port="$4"
+
+    src_arg=""
+    [ -n "$src" ] && src_arg="-s $src"
+
+    if [ "$mode" = "tproxy" ]; then
+        iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -p tcp -j TPROXY --on-port "$tproxy_port" --tproxy-mark "$FW_MARK"
+        iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -p udp -j TPROXY --on-port "$tproxy_port" --tproxy-mark "$FW_MARK"
+    else
+        iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -j MARK --set-mark "$FW_MARK"
+    fi
+}
+
+add_mihomo_route_rules() {
+    chain="$1"
+    mode="$2"
+    tproxy_port="$3"
+
+    if has_include_rules; then
+        list_items "$INCLUDE_FILE" | while read item; do
+            apply_mihomo_target "$chain" "$mode" "$item" "$tproxy_port"
+        done
+    else
+        apply_mihomo_target "$chain" "$mode" "" "$tproxy_port"
+    fi
+}
+
+apply_dns_redirect() {
+    dns_port="$1"
+    iptables -t nat -N "$NAT_CHAIN" 2>/dev/null
+    iptables -t nat -F "$NAT_CHAIN"
+    iptables -t nat -C PREROUTING -j "$NAT_CHAIN" 2>/dev/null || \
+        iptables -t nat -I PREROUTING -j "$NAT_CHAIN"
+
+    list_items "$EXCLUDE_FILE" | while read item; do
+        iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p tcp --dport 53 -j RETURN
+        iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p udp --dport 53 -j RETURN
+    done
+
+    if has_include_rules; then
+        list_items "$INCLUDE_FILE" | while read item; do
+            iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p tcp --dport 53 -j REDIRECT --to-ports "$dns_port"
+            iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p udp --dport 53 -j REDIRECT --to-ports "$dns_port"
+        done
+    else
+        iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -p tcp --dport 53 -j REDIRECT --to-ports "$dns_port"
+        iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -p udp --dport 53 -j REDIRECT --to-ports "$dns_port"
+    fi
+}
+
+apply_rules() {
+    cfg="$(config_file)" || die "missing $CONFIG_DIR/$CONFIG_NAME"
+    mode="$(detect_mode "$cfg")"
+    dns_port="$(detect_dns_port "$cfg")"
+    tun_if="$(detect_tun_if "$cfg")"
+
+    flush_rules
+    load_kernel_modules "$mode"
+
+    iptables -t mangle -N "$MANGLE_CHAIN" 2>/dev/null
+    iptables -t mangle -F "$MANGLE_CHAIN"
+    iptables -t mangle -C PREROUTING -j "$MANGLE_CHAIN" 2>/dev/null || \
+        iptables -t mangle -I PREROUTING -j "$MANGLE_CHAIN"
+
+    add_bypass_rules "$MANGLE_CHAIN"
+    add_exclude_rules "$MANGLE_CHAIN"
+    iptables -t mangle -A "$MANGLE_CHAIN" -i "$LAN_IF" -p tcp --dport 53 -j RETURN
+    iptables -t mangle -A "$MANGLE_CHAIN" -i "$LAN_IF" -p udp --dport 53 -j RETURN
+
+    if [ "$mode" = "tproxy" ]; then
+        tproxy_port="$(yaml_value tproxy-port "$cfg")"
+        add_mihomo_route_rules "$MANGLE_CHAIN" "$mode" "$tproxy_port"
+        ip route add local 0.0.0.0/0 dev lo table "$ROUTE_TABLE" 2>/dev/null
+    else
+        add_mihomo_route_rules "$MANGLE_CHAIN" "$mode" ""
+        iptables -C FORWARD -i "$tun_if" -j ACCEPT 2>/dev/null || iptables -I FORWARD -i "$tun_if" -j ACCEPT
+        iptables -C FORWARD -o "$tun_if" -j ACCEPT 2>/dev/null || iptables -I FORWARD -o "$tun_if" -j ACCEPT
+        iptables -C INPUT -i "$tun_if" -j ACCEPT 2>/dev/null || iptables -I INPUT -i "$tun_if" -j ACCEPT
+        iptables -C OUTPUT -o "$tun_if" -j ACCEPT 2>/dev/null || iptables -I OUTPUT -o "$tun_if" -j ACCEPT
+        [ -e "/proc/sys/net/ipv4/conf/$tun_if/rp_filter" ] && echo 2 > "/proc/sys/net/ipv4/conf/$tun_if/rp_filter"
+        ip route add default dev "$tun_if" table "$ROUTE_TABLE" 2>/dev/null
+    fi
+
+    ip rule add fwmark "$FW_MARK" lookup "$ROUTE_TABLE" priority "$RULE_PRIORITY" 2>/dev/null
+    apply_dns_redirect "$dns_port"
+    echo "$mode" > "$MODE_FILE"
+    echo "$tun_if" > "$TUN_FILE"
+    log "rules applied: mode=$mode tproxy_port=${tproxy_port:-none} dns_port=$dns_port table=$ROUTE_TABLE mark=$FW_MARK"
+}
+
+start_mihomo() {
+    ensure_dirs
+    ensure_alias
+    cfg="$(config_file)" || die "missing $CONFIG_DIR/$CONFIG_NAME"
+    [ -x "$MIHOMO_BIN" ] || die "missing executable $MIHOMO_BIN"
+    is_running && die "mihomo is already running"
+
+    mode="$(detect_mode "$cfg")"
+    load_kernel_modules "$mode"
+
+    log "starting mihomo with $cfg"
+    "$MIHOMO_BIN" -d "$MIHOMO_HOME" -f "$cfg" >> "$LOG_FILE" 2>&1 &
+    echo "$!" > "$PID_FILE"
+    sleep 3
+    is_running || die "mihomo failed to start; check $LOG_FILE"
+
+    apply_rules
+    install_hooks
+    log "mihomo started in $mode mode"
+}
+
+stop_mihomo() {
+    cleanup_hooks
+    flush_rules
+
+    if ! is_running; then
+        rm -f "$PID_FILE" "$MODE_FILE" "$TUN_FILE"
+        log "mihomo stopped"
+        return 0
+    fi
+
+    mihomo_pids | sort -u | while read pid; do
+        kill "$pid" 2>/dev/null
+    done
+    if ! wait_stopped 10; then
+        mihomo_pids | sort -u | while read pid; do
+            kill -9 "$pid" 2>/dev/null
+        done
+        wait_stopped 3 || die "cannot stop mihomo process"
+    fi
+
+    rm -f "$PID_FILE" "$MODE_FILE" "$TUN_FILE"
+    log "mihomo stopped"
+}
+
+install_mihomo() {
+    ensure_dirs
+    install_script
+    install_core
+    log "mihomo installed"
+    log "put config to $CONFIG_DIR/$CONFIG_NAME before start"
+}
+
+exclude_mihomo() {
+    ensure_dirs
+    case "$1" in
+        show|"")
+            show_list "Excluded IP/CIDR list. These clients bypass Mihomo." "$EXCLUDE_FILE"
+            ;;
+        clear)
+            : > "$EXCLUDE_FILE"
+            print_message "SUCCESS" "excluded IP list cleared"
+            logger -t mihomo "excluded IP list cleared"
+            is_running && apply_rules
+            ;;
+        add)
+            shift
+            [ "$#" -gt 0 ] || die "usage: mihomo exclude add <ip-or-cidr> [more...]"
+            append_list_items "$EXCLUDE_FILE" "$@"
+            print_message "SUCCESS" "excluded IP list updated"
+            logger -t mihomo "excluded IP list updated"
+            is_running && apply_rules
+            ;;
+        del|delete|remove)
+            shift
+            [ "$#" -gt 0 ] || die "usage: mihomo exclude del <ip-or-cidr> [more...]"
+            delete_list_items "$EXCLUDE_FILE" "$@"
+            print_message "SUCCESS" "excluded IP list updated"
+            logger -t mihomo "excluded IP list updated"
+            is_running && apply_rules
+            ;;
+        set)
+            shift
+            : > "$EXCLUDE_FILE"
+            append_list_items "$EXCLUDE_FILE" "$@"
+            print_message "SUCCESS" "excluded IP list updated"
+            logger -t mihomo "excluded IP list updated"
+            is_running && apply_rules
+            ;;
+        *)
+            print_message "INFO" "Usage: mihomo exclude {show|add|del|set|clear} [ip-or-cidr...]"
+            exit 1
+            ;;
+    esac
+}
+
+include_mihomo() {
+    ensure_dirs
+    case "$1" in
+        show|"")
+            show_list "Included IP/CIDR list. If not empty, only these clients use Mihomo." "$INCLUDE_FILE"
+            ;;
+        clear)
+            : > "$INCLUDE_FILE"
+            print_message "SUCCESS" "included IP list cleared"
+            logger -t mihomo "included IP list cleared"
+            is_running && apply_rules
+            ;;
+        add)
+            shift
+            [ "$#" -gt 0 ] || die "usage: mihomo include add <ip-or-cidr> [more...]"
+            append_list_items "$INCLUDE_FILE" "$@"
+            print_message "SUCCESS" "included IP list updated"
+            logger -t mihomo "included IP list updated"
+            is_running && apply_rules
+            ;;
+        del|delete|remove)
+            shift
+            [ "$#" -gt 0 ] || die "usage: mihomo include del <ip-or-cidr> [more...]"
+            delete_list_items "$INCLUDE_FILE" "$@"
+            print_message "SUCCESS" "included IP list updated"
+            logger -t mihomo "included IP list updated"
+            is_running && apply_rules
+            ;;
+        set)
+            shift
+            : > "$INCLUDE_FILE"
+            append_list_items "$INCLUDE_FILE" "$@"
+            print_message "SUCCESS" "included IP list updated"
+            logger -t mihomo "included IP list updated"
+            is_running && apply_rules
+            ;;
+        *)
+            print_message "INFO" "Usage: mihomo include {show|add|del|set|clear} [ip-or-cidr...]"
+            exit 1
+            ;;
+    esac
+}
+
+update_mihomo() {
+    ensure_dirs
+    ensure_alias
+    cur="$(current_version)"
+    latest="$(latest_version)"
+    [ -n "$latest" ] || die "cannot get latest Mihomo version"
+
+    if [ -n "$cur" ] && [ "$cur" = "$latest" ]; then
+        log "mihomo core is up to date: $cur"
+        log "no update required"
+        return 0
+    fi
+
+    [ -n "$cur" ] && log "mihomo core update available: $cur -> $latest" || log "mihomo core update available: $latest"
+    stop_mihomo
+    rm -f "$MIHOMO_BIN"
+    install_core
+    start_mihomo
+}
+
+status_mihomo() {
+    ensure_alias
+    arch="$(get_uname -m)"
+    if is_running; then
+        state="running"
+    else
+        state="not running"
+    fi
+
+    if [ "$state" = "running" ]; then
+        print_message "SUCCESS" "mihomo: running"
+    else
+        print_message "WARN" "mihomo: not running"
+    fi
+    print_message "INFO" "architecture: $arch"
+    [ -x "$MIHOMO_BIN" ] && print_message "INFO" "core: $MIHOMO_BIN"
+    version="$(current_version)"
+    [ -n "$version" ] && print_message "INFO" "version: $version"
+    cfg="$(config_file 2>/dev/null)"
+    [ -n "$cfg" ] && print_message "INFO" "config: $cfg"
+}
+
+pause_enter() {
+    printf '\nPress Enter to continue... '
+    read dummy
+}
+
+setup_list_menu() {
+    list_name="$1"
+    file="$2"
+    while :; do
+        printf '\n%s%s%s\n' "$BOLD" "Mihomo $list_name IP/CIDR setup" "$RESET"
+        show_list "$list_name list" "$file"
+        printf '\n'
+        printf '  1) Add IP/CIDR\n'
+        printf '  2) Delete IP/CIDR\n'
+        printf '  3) Replace whole list\n'
+        printf '  4) Clear list\n'
+        printf '  0) Back\n'
+        printf '\nSelect option: '
+        read choice
+        case "$choice" in
+            1)
+                printf 'Enter IP/CIDR separated by spaces: '
+                read items
+                [ -n "$items" ] && append_list_items "$file" $items
+                print_message "SUCCESS" "$list_name list updated"
+                is_running && apply_rules
+                ;;
+            2)
+                printf 'Enter IP/CIDR to delete, separated by spaces: '
+                read items
+                [ -n "$items" ] && delete_list_items "$file" $items
+                print_message "SUCCESS" "$list_name list updated"
+                is_running && apply_rules
+                ;;
+            3)
+                printf 'Enter new IP/CIDR list, separated by spaces: '
+                read items
+                : > "$file"
+                [ -n "$items" ] && append_list_items "$file" $items
+                print_message "SUCCESS" "$list_name list replaced"
+                is_running && apply_rules
+                ;;
+            4)
+                : > "$file"
+                print_message "SUCCESS" "$list_name list cleared"
+                is_running && apply_rules
+                ;;
+            0) return 0 ;;
+            *) print_message "WARN" "unknown option" ;;
+        esac
+    done
+}
+
+setup_mihomo() {
+    ensure_dirs
+    while :; do
+        printf '\n%s%s%s\n' "$BOLD" "Mihomo routing setup" "$RESET"
+        printf '  1) Include list: only listed clients use Mihomo\n'
+        printf '  2) Exclude list: listed clients bypass Mihomo\n'
+        printf '  3) Show both lists\n'
+        printf '  4) Apply rules now\n'
+        printf '  0) Back\n'
+        printf '\nSelect option: '
+        read choice
+        case "$choice" in
+            1) setup_list_menu "include" "$INCLUDE_FILE" ;;
+            2) setup_list_menu "exclude" "$EXCLUDE_FILE" ;;
+            3) show_list "Include" "$INCLUDE_FILE"; show_list "Exclude" "$EXCLUDE_FILE"; pause_enter ;;
+            4) apply_rules; pause_enter ;;
+            0) return 0 ;;
+            *) print_message "WARN" "unknown option" ;;
+        esac
+    done
+}
+
+usage_mihomo() {
+    printf '%s%s%s\n' "$BOLD" "mihomo4asus" "$RESET"
+    printf '\n'
+    print_message "ACTION" "Service commands"
+    printf '  mihomo install       install script, core and boot hooks\n'
+    printf '  mihomo start         start Mihomo and apply routing rules\n'
+    printf '  mihomo stop          stop Mihomo and remove routing rules\n'
+    printf '  mihomo restart       restart Mihomo\n'
+    printf '  mihomo status        show core state and architecture\n'
+    printf '  mihomo update        update Mihomo core if a new version exists\n'
+    printf '\n'
+    print_message "ACTION" "Routing lists"
+    printf '  mihomo setup         interactive include/exclude setup\n'
+    printf '  mihomo include show|add|del|set|clear [ip-or-cidr...]\n'
+    printf '  mihomo exclude show|add|del|set|clear [ip-or-cidr...]\n'
+    printf '\n'
+    print_message "ACTION" "Maintenance"
+    printf '  mihomo uninstall     remove core, files, hooks and iptables rules\n'
+}
+
+main_menu() {
+    while :; do
+        printf '\n%s%s%s\n' "$BOLD" "mihomo4asus" "$RESET"
+        printf '  1) Status\n'
+        printf '  2) Start\n'
+        printf '  3) Stop\n'
+        printf '  4) Restart\n'
+        printf '  5) Update core\n'
+        printf '  6) Routing setup\n'
+        printf '  7) Show commands\n'
+        printf '  0) Exit\n'
+        printf '\nSelect option: '
+        read choice
+        case "$choice" in
+            1) status_mihomo; pause_enter ;;
+            2) start_mihomo; pause_enter ;;
+            3) stop_mihomo; pause_enter ;;
+            4) stop_mihomo; sleep 2; start_mihomo; pause_enter ;;
+            5) update_mihomo; pause_enter ;;
+            6) setup_mihomo ;;
+            7) usage_mihomo; pause_enter ;;
+            0) exit 0 ;;
+            *) print_message "WARN" "unknown option" ;;
+        esac
+    done
+}
+
+uninstall_mihomo() {
+    stop_mihomo
+    rm -rf "$MIHOMO_HOME"
+    rm -f "$SCRIPT_PATH" "$LN_PATH"
+    [ -f /jffs/configs/profile.add ] && sed -i "/alias mihomo=.*mihomo/d" /jffs/configs/profile.add
+    rmdir "$(dirname "$SCRIPT_PATH")" 2>/dev/null
+    log "mihomo uninstalled"
+}
+
+case "$1" in
+    "") main_menu ;;
+    install) install_mihomo ;;
+    start) start_mihomo ;;
+    stop) stop_mihomo ;;
+    restart) stop_mihomo; sleep 2; start_mihomo ;;
+    status) status_mihomo ;;
+    update) update_mihomo ;;
+    setup) setup_mihomo ;;
+    exclude) shift; exclude_mihomo "$@" ;;
+    include) shift; include_mihomo "$@" ;;
+    uninstall) uninstall_mihomo ;;
+    apply-rules) apply_rules ;;
+    help|-h|--help) usage_mihomo ;;
+    *) usage_mihomo; exit 1 ;;
+esac
