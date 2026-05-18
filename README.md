@@ -56,14 +56,7 @@ rules:
 Create or edit the config directly on the router:
 
 ```sh
-mkdir -p /opt/root/mihomo/config
 nano /opt/root/mihomo/config/config.yaml
-```
-
-Copy an existing config file into place:
-
-```sh
-cp /tmp/config.yaml /opt/root/mihomo/config/config.yaml
 ```
 
 After editing the config, restart Mihomo:
