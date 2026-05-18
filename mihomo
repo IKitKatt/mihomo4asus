@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Minimal Mihomo runner for ASUSWRT-Merlin + Entware.
+# Minimal Mihomo TProxy runner for ASUSWRT-Merlin + Entware.
 # Public commands: install, start, stop, restart, status, update, setup, include, exclude, uninstall.
 
 MIHOMO_SCRIPT_DEPTH="${MIHOMO_SCRIPT_DEPTH:-0}"
@@ -14,6 +14,7 @@ MIHOMO_BIN="${MIHOMO_BIN:-$MIHOMO_HOME/mihomo}"
 MIHOMO_REPO="${MIHOMO_REPO:-MetaCubeX/mihomo}"
 MIHOMO_API="${MIHOMO_API:-https://api.github.com/repos/$MIHOMO_REPO/releases/latest}"
 CONFIG_DIR="${CONFIG_DIR:-$MIHOMO_HOME/config}"
+CONFIG_FILE="$CONFIG_DIR/config.yaml"
 RUN_DIR="${RUN_DIR:-$MIHOMO_HOME/run}"
 LOG_FILE="${LOG_FILE:-$MIHOMO_HOME/mihomo.log}"
 DOWNLOAD_DIR="${DOWNLOAD_DIR:-$MIHOMO_HOME/download}"
@@ -28,9 +29,7 @@ LAN_IF="${LAN_IF:-br0}"
 ROUTE_TABLE="${ROUTE_TABLE:-5554}"
 FW_MARK="${FW_MARK:-0x4d3c2b1b}"
 RULE_PRIORITY="${RULE_PRIORITY:-5354}"
-DEFAULT_TUN_IF="${DEFAULT_TUN_IF:-mihomo}"
 DNS_PORT="${DNS_PORT:-1053}"
-CONFIG_NAME="${CONFIG_NAME:-config.yaml}"
 EXCLUDE_FILE="${EXCLUDE_FILE:-$CONFIG_DIR/exclude.list}"
 INCLUDE_FILE="${INCLUDE_FILE:-$CONFIG_DIR/include.list}"
 
@@ -39,7 +38,6 @@ MANGLE_CHAIN="MIHOMO-MANGLE"
 NAT_CHAIN="MIHOMO-NAT"
 PID_FILE="$RUN_DIR/mihomo.pid"
 MODE_FILE="$RUN_DIR/mode"
-TUN_FILE="$RUN_DIR/tun_if"
 
 if [ -t 1 ]; then
     RED="$(printf '\033[31m')"
@@ -113,15 +111,8 @@ ensure_script_dirs() {
 }
 
 config_file() {
-    if [ -f "$CONFIG_DIR/$CONFIG_NAME" ]; then
-        echo "$CONFIG_DIR/$CONFIG_NAME"
-    elif [ -f "$CONFIG_DIR/mihomo.yml" ]; then
-        echo "$CONFIG_DIR/mihomo.yml"
-    elif [ -f "$CONFIG_DIR/mihomo.yaml" ]; then
-        echo "$CONFIG_DIR/mihomo.yaml"
-    else
-        return 1
-    fi
+    [ -f "$CONFIG_FILE" ] || return 1
+    echo "$CONFIG_FILE"
 }
 
 is_running() {
@@ -181,29 +172,24 @@ yaml_block_value() {
     ' "$file"
 }
 
-detect_mode() {
+detect_tproxy_port() {
     file="$1"
-    tun_enable="$(yaml_block_value tun enable "$file")"
-    tproxy_port="$(yaml_value tproxy-port "$file")"
+    line="$(grep '^tproxy-port:' "$file" 2>/dev/null | head -n 1)"
+    [ -n "$line" ] || return 1
 
-    if echo "$tun_enable" | grep -Eiq '^(true|1)$'; then
-        echo "tun"
-        return 0
-    fi
-    if echo "$tproxy_port" | grep -Eq '^[0-9]+$'; then
-        echo "tproxy"
-        return 0
-    fi
+    port="${line#*:}"
+    port="${port%%#*}"
+    port="$(printf '%s' "$port" | sed 's/^[ 	"]*//;s/[ 	"].*$//;s/\r$//')"
 
-    die "config must contain either tun.enable: true or tproxy-port"
-}
+    case "$port" in
+        ""|*[!0-9]*)
+            return 1
+            ;;
+    esac
 
-detect_tun_if() {
-    file="$1"
-    tun_if="$(yaml_block_value tun device "$file")"
-    [ -n "$tun_if" ] || tun_if="$(yaml_block_value tun interface-name "$file")"
-    [ -n "$tun_if" ] || tun_if="$DEFAULT_TUN_IF"
-    echo "$tun_if"
+    [ "$port" -gt 0 ] 2>/dev/null || return 1
+    [ "$port" -lt 65536 ] 2>/dev/null || return 1
+    echo "$port"
 }
 
 detect_dns_port() {
@@ -371,25 +357,10 @@ install_hooks() {
 }
 
 load_kernel_modules() {
-    mode="$1"
-    if [ "$mode" = "tun" ]; then
-        lsmod | grep -q "^tun " || modprobe tun 2>/dev/null
-    else
-        lsmod | grep -q "^xt_TPROXY " || modprobe xt_TPROXY 2>/dev/null
-    fi
+    lsmod | grep -q "^xt_TPROXY " || modprobe xt_TPROXY 2>/dev/null
 }
 
 flush_rules() {
-    tun_if="$DEFAULT_TUN_IF"
-    if [ -f "$TUN_FILE" ]; then
-        saved_tun_if="$(cat "$TUN_FILE" 2>/dev/null)"
-        [ -n "$saved_tun_if" ] && tun_if="$saved_tun_if"
-    else
-        cfg="$(config_file 2>/dev/null)"
-        [ -n "$cfg" ] && tun_if="$(detect_tun_if "$cfg")"
-        [ -n "$tun_if" ] || tun_if="$DEFAULT_TUN_IF"
-    fi
-
     ip rule del fwmark "$FW_MARK" lookup "$ROUTE_TABLE" priority "$RULE_PRIORITY" 2>/dev/null
     ip rule del fwmark "$FW_MARK" lookup "$ROUTE_TABLE" 2>/dev/null
     ip route flush table "$ROUTE_TABLE" 2>/dev/null
@@ -401,11 +372,6 @@ flush_rules() {
     iptables -t nat -D PREROUTING -j "$NAT_CHAIN" 2>/dev/null
     iptables -t nat -F "$NAT_CHAIN" 2>/dev/null
     iptables -t nat -X "$NAT_CHAIN" 2>/dev/null
-
-    iptables -D FORWARD -i "$tun_if" -j ACCEPT 2>/dev/null
-    iptables -D FORWARD -o "$tun_if" -j ACCEPT 2>/dev/null
-    iptables -D INPUT -i "$tun_if" -j ACCEPT 2>/dev/null
-    iptables -D OUTPUT -o "$tun_if" -j ACCEPT 2>/dev/null
 }
 
 add_bypass_rules() {
@@ -490,32 +456,26 @@ has_include_rules() {
 
 apply_mihomo_target() {
     chain="$1"
-    mode="$2"
-    src="$3"
-    tproxy_port="$4"
+    src="$2"
+    tproxy_port="$3"
 
     src_arg=""
     [ -n "$src" ] && src_arg="-s $src"
 
-    if [ "$mode" = "tproxy" ]; then
-        iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -p tcp -j TPROXY --on-port "$tproxy_port" --tproxy-mark "$FW_MARK"
-        iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -p udp -j TPROXY --on-port "$tproxy_port" --tproxy-mark "$FW_MARK"
-    else
-        iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -j MARK --set-mark "$FW_MARK"
-    fi
+    iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -p tcp -j TPROXY --on-port "$tproxy_port" --tproxy-mark "$FW_MARK"
+    iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -p udp -j TPROXY --on-port "$tproxy_port" --tproxy-mark "$FW_MARK"
 }
 
 add_mihomo_route_rules() {
     chain="$1"
-    mode="$2"
-    tproxy_port="$3"
+    tproxy_port="$2"
 
     if has_include_rules; then
         list_items "$INCLUDE_FILE" | while read item; do
-            apply_mihomo_target "$chain" "$mode" "$item" "$tproxy_port"
+            apply_mihomo_target "$chain" "$item" "$tproxy_port"
         done
     else
-        apply_mihomo_target "$chain" "$mode" "" "$tproxy_port"
+        apply_mihomo_target "$chain" "" "$tproxy_port"
     fi
 }
 
@@ -543,13 +503,12 @@ apply_dns_redirect() {
 }
 
 apply_rules() {
-    cfg="$(config_file)" || die "missing $CONFIG_DIR/$CONFIG_NAME"
-    mode="$(detect_mode "$cfg")"
+    cfg="$(config_file)" || die "missing $CONFIG_FILE"
+    tproxy_port="$(detect_tproxy_port "$cfg")" || die "config $cfg must contain numeric tproxy-port, for example: tproxy-port: 7894"
     dns_port="$(detect_dns_port "$cfg")"
-    tun_if="$(detect_tun_if "$cfg")"
 
     flush_rules
-    load_kernel_modules "$mode"
+    load_kernel_modules
 
     iptables -t mangle -N "$MANGLE_CHAIN" 2>/dev/null
     iptables -t mangle -F "$MANGLE_CHAIN"
@@ -561,36 +520,24 @@ apply_rules() {
     iptables -t mangle -A "$MANGLE_CHAIN" -i "$LAN_IF" -p tcp --dport 53 -j RETURN
     iptables -t mangle -A "$MANGLE_CHAIN" -i "$LAN_IF" -p udp --dport 53 -j RETURN
 
-    if [ "$mode" = "tproxy" ]; then
-        tproxy_port="$(yaml_value tproxy-port "$cfg")"
-        add_mihomo_route_rules "$MANGLE_CHAIN" "$mode" "$tproxy_port"
-        ip route add local 0.0.0.0/0 dev lo table "$ROUTE_TABLE" 2>/dev/null
-    else
-        add_mihomo_route_rules "$MANGLE_CHAIN" "$mode" ""
-        iptables -C FORWARD -i "$tun_if" -j ACCEPT 2>/dev/null || iptables -I FORWARD -i "$tun_if" -j ACCEPT
-        iptables -C FORWARD -o "$tun_if" -j ACCEPT 2>/dev/null || iptables -I FORWARD -o "$tun_if" -j ACCEPT
-        iptables -C INPUT -i "$tun_if" -j ACCEPT 2>/dev/null || iptables -I INPUT -i "$tun_if" -j ACCEPT
-        iptables -C OUTPUT -o "$tun_if" -j ACCEPT 2>/dev/null || iptables -I OUTPUT -o "$tun_if" -j ACCEPT
-        [ -e "/proc/sys/net/ipv4/conf/$tun_if/rp_filter" ] && echo 2 > "/proc/sys/net/ipv4/conf/$tun_if/rp_filter"
-        ip route add default dev "$tun_if" table "$ROUTE_TABLE" 2>/dev/null
-    fi
+    add_mihomo_route_rules "$MANGLE_CHAIN" "$tproxy_port"
+    ip route add local 0.0.0.0/0 dev lo table "$ROUTE_TABLE" 2>/dev/null
 
     ip rule add fwmark "$FW_MARK" lookup "$ROUTE_TABLE" priority "$RULE_PRIORITY" 2>/dev/null
     apply_dns_redirect "$dns_port"
-    echo "$mode" > "$MODE_FILE"
-    echo "$tun_if" > "$TUN_FILE"
-    log "rules applied: mode=$mode tproxy_port=${tproxy_port:-none} dns_port=$dns_port table=$ROUTE_TABLE mark=$FW_MARK"
+    echo "tproxy" > "$MODE_FILE"
+    log "rules applied: mode=tproxy tproxy_port=$tproxy_port dns_port=$dns_port table=$ROUTE_TABLE mark=$FW_MARK"
 }
 
 start_mihomo() {
     ensure_dirs
     ensure_alias
-    cfg="$(config_file)" || die "missing $CONFIG_DIR/$CONFIG_NAME"
+    cfg="$(config_file)" || die "missing $CONFIG_FILE"
     [ -x "$MIHOMO_BIN" ] || die "missing executable $MIHOMO_BIN"
     is_running && die "mihomo is already running"
 
-    mode="$(detect_mode "$cfg")"
-    load_kernel_modules "$mode"
+    detect_tproxy_port "$cfg" >/dev/null || die "config $cfg must contain numeric tproxy-port, for example: tproxy-port: 7894"
+    load_kernel_modules
 
     log "starting mihomo with $cfg"
     "$MIHOMO_BIN" -d "$MIHOMO_HOME" -f "$cfg" >> "$LOG_FILE" 2>&1 &
@@ -600,7 +547,7 @@ start_mihomo() {
 
     apply_rules
     install_hooks
-    log "mihomo started in $mode mode"
+    log "mihomo started in tproxy mode"
 }
 
 stop_mihomo() {
@@ -608,7 +555,7 @@ stop_mihomo() {
     flush_rules
 
     if ! is_running; then
-        rm -f "$PID_FILE" "$MODE_FILE" "$TUN_FILE"
+        rm -f "$PID_FILE" "$MODE_FILE"
         log "mihomo stopped"
         return 0
     fi
@@ -623,7 +570,7 @@ stop_mihomo() {
         wait_stopped 3 || die "cannot stop mihomo process"
     fi
 
-    rm -f "$PID_FILE" "$MODE_FILE" "$TUN_FILE"
+    rm -f "$PID_FILE" "$MODE_FILE"
     log "mihomo stopped"
 }
 
@@ -632,7 +579,7 @@ install_mihomo() {
     install_script
     install_core
     log "mihomo installed"
-    log "put config to $CONFIG_DIR/$CONFIG_NAME before start"
+    log "put config to $CONFIG_FILE before start"
 }
 
 exclude_mihomo() {
