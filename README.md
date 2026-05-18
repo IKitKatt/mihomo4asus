@@ -66,50 +66,15 @@ mihomo restart
 
 ## Commands
 
-Open the interactive console menu:
-```sh
-mihomo
-```
-
-Install or reinstall the script and Mihomo core:
-```sh
-mihomo install
-```
-
-Start Mihomo, load kernel modules, apply iptables/ip rule/ip route rules, and register Merlin hook lines:
-```sh
-mihomo start
-```
-
-Stop Mihomo and remove routing rules:
-```sh
-mihomo stop
-```
-
-Restart Mihomo:
-```sh
-mihomo restart
-```
-
-Show current state, architecture, core path, version, and config path:
-```sh
-mihomo status
-```
-
-Check the latest Mihomo release. If a newer core exists, stop Mihomo, replace the core, and start it again:
-```sh
-mihomo update
-```
-
-Open interactive include/exclude IP setup:
-```sh
-mihomo setup
-```
-
-Remove Mihomo core, config folder, runtime files, hook lines, command symlink, and routing rules:
-```sh
-mihomo uninstall
-```
+- `mihomo` — opens the interactive console menu.
+- `mihomo install` — installs or reinstalls the script and Mihomo core.
+- `mihomo start` — starts Mihomo, loads required modules, applies routing rules, and registers Merlin hook lines.
+- `mihomo stop` — stops Mihomo and removes routing rules.
+- `mihomo restart` — restarts Mihomo.
+- `mihomo status` — shows current state, architecture, core path, version, and config path.
+- `mihomo update` — checks the latest Mihomo release, replaces the core if needed, and starts Mihomo again.
+- `mihomo setup` — opens interactive include/exclude IP setup.
+- `mihomo uninstall` — removes Mihomo core, config folder, runtime files, hook lines, command symlink, and routing rules.
 
 ## Include And Exclude Lists
 
