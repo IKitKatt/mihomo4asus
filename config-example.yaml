@@ -1,11 +1,8 @@
-# Minimal mihomo4asus config example for fake-ip mode.
+# Minimal mihomo4asus config example.
 # Copy this file to /opt/root/mihomo/config/config.yaml and replace proxy placeholders.
-# Fake-IP captures domain traffic through 198.18.0.0/15.
-# Apps that connect directly to real IP ranges need /opt/root/mihomo/config/fakeip-dst.list.
-# Real UDP port ranges, for example Discord voice, can use /opt/root/mihomo/config/fakeip-port.list.
 
 mode: rule
-log-level: info
+log-level: error
 ipv6: false
 allow-lan: true
 unified-delay: true
@@ -18,8 +15,7 @@ tproxy-port: 7894
 # Open Zashboard after start:
 #   http://<router-ip>:9090/ui
 external-controller: 0.0.0.0:9090
-secret: "change-me"
-external-ui: ui
+external-ui: ./ui
 external-ui-name: zashboard
 external-ui-url: "https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.zip"
 
@@ -31,9 +27,8 @@ dns:
   enable: true
   listen: 0.0.0.0:1053
   ipv6: false
+  enhanced-mode: redir-host
   use-hosts: true
-
-
   default-nameserver:
     - 1.1.1.1
     - 8.8.8.8
@@ -41,8 +36,8 @@ dns:
     - https://1.1.1.1/dns-query
     - https://8.8.8.8/dns-query
   proxy-server-nameserver:
-    - 1.1.1.1
-    - 8.8.8.8
+    - https://1.1.1.1/dns-query
+    - https://8.8.8.8/dns-query
   direct-nameserver:
     - 77.88.8.8
     - 8.8.8.8
@@ -65,9 +60,6 @@ proxies:
     servername: example.com
     client-fingerprint: chrome
 
-  - name: DNS-OUT
-    type: dns
-
 proxy-groups:
   - name: PROXY
     type: select
@@ -85,7 +77,6 @@ proxy-groups:
       - Proxy
 
 rules:
-  - DST-PORT,53,DNS-OUT
   - IP-CIDR,0.0.0.0/8,DIRECT,no-resolve
   - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
   - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
