@@ -1,0 +1,41 @@
+# Cache files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.temp/
+.tmp/
+tmp/
+temp/
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Local/runtime files
+*.pid
+*.tmp
+*.bak
+
+# Old script snapshots
+old/*
+!old/.gitkeep
+
+# Project-local files
+config.yaml
+install.sh
+
+# Old folder
+old/
