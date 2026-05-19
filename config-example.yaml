@@ -1,4 +1,4 @@
-# Minimal mihomo4asus config example.
+# Minimal mihomo4asus config example for fake-ip mode.
 # Copy this file to /opt/root/mihomo/config/config.yaml and replace proxy placeholders.
 
 mode: rule
@@ -27,8 +27,18 @@ dns:
   enable: true
   listen: 0.0.0.0:1053
   ipv6: false
-  enhanced-mode: redir-host
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.0/15
   use-hosts: true
+
+  # Domains listed here receive real IP addresses and bypass fake-ip TProxy capture.
+  # Add your local/home-server domains here if they must stay outside Mihomo.
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+    - "*.home.arpa"
+    - "router.asus.com"
+
   default-nameserver:
     - 1.1.1.1
     - 8.8.8.8
