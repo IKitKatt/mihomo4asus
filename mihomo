@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Minimal Mihomo TProxy runner for ASUSWRT-Merlin + Entware.
-# Public commands: install, start, stop, restart, status, update, setup, include, exclude, uninstall.
+# Public commands: install, start, stop, restart, status, debug, update, setup, include, exclude, uninstall.
 
 MIHOMO_SCRIPT_DEPTH="${MIHOMO_SCRIPT_DEPTH:-0}"
 MIHOMO_SCRIPT_DEPTH=$((MIHOMO_SCRIPT_DEPTH + 1))
@@ -17,6 +17,7 @@ CONFIG_DIR="${CONFIG_DIR:-$MIHOMO_HOME/config}"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
 RUN_DIR="${RUN_DIR:-$MIHOMO_HOME/run}"
 LOG_FILE="${LOG_FILE:-$MIHOMO_HOME/mihomo.log}"
+DEBUG_LOG_FILE="${DEBUG_LOG_FILE:-$MIHOMO_HOME/mihomo-debug.log}"
 DOWNLOAD_DIR="${DOWNLOAD_DIR:-$MIHOMO_HOME/download}"
 
 SCRIPT_PATH="${SCRIPT_PATH:-/jffs/addons/mihomo/mihomo}"
@@ -37,6 +38,8 @@ TAG="mihomo-script"
 MANGLE_CHAIN="MIHOMO-MANGLE"
 NAT_CHAIN="MIHOMO-NAT"
 PID_FILE="$RUN_DIR/mihomo.pid"
+SUPERVISOR_PID_FILE="$RUN_DIR/mihomo-supervisor.pid"
+STOP_FLAG_FILE="$RUN_DIR/stop.flag"
 MODE_FILE="$RUN_DIR/mode"
 
 if [ -t 1 ]; then
@@ -74,6 +77,46 @@ print_message() {
 log() {
     print_message "INFO" "$1"
     logger -t mihomo "$1"
+    debug_log "INFO: $1"
+}
+
+debug_log() {
+    mkdir -p "$RUN_DIR" 2>/dev/null
+    ts="$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown-time)"
+    printf '%s %s\n' "$ts" "$1" >> "$DEBUG_LOG_FILE"
+    logger -t mihomo-debug "$1"
+}
+
+debug_cmd() {
+    title="$1"
+    shift
+    debug_log "--- $title ---"
+    "$@" >> "$DEBUG_LOG_FILE" 2>&1
+}
+
+debug_snapshot() {
+    reason="$1"
+    debug_log "snapshot: $reason"
+    debug_log "script=$SCRIPT_PATH bin=$MIHOMO_BIN config=$CONFIG_FILE log=$LOG_FILE"
+    current_pid="$(cat "$PID_FILE" 2>/dev/null)"
+    current_supervisor_pid="$(cat "$SUPERVISOR_PID_FILE" 2>/dev/null)"
+    debug_log "pid_file=$current_pid supervisor_pid=$current_supervisor_pid"
+    debug_log "arch=$(get_uname -m 2>/dev/null) kernel=$(get_uname -r 2>/dev/null)"
+    [ -x "$MIHOMO_BIN" ] && "$MIHOMO_BIN" -v >> "$DEBUG_LOG_FILE" 2>&1
+    if [ -f "$CONFIG_FILE" ]; then
+        config_size="$(wc -c < "$CONFIG_FILE" 2>/dev/null)"
+        config_mtime="$(date -r "$CONFIG_FILE" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+        debug_log "config_size=$config_size config_mtime=$config_mtime"
+    fi
+    debug_cmd "ps mihomo" sh -c "ps | grep -v grep | grep mihomo"
+    debug_cmd "memory" sh -c "free 2>/dev/null || cat /proc/meminfo 2>/dev/null"
+    debug_cmd "disk" df -h
+    debug_cmd "iptables mangle MIHOMO" sh -c "iptables -t mangle -S 2>/dev/null | grep MIHOMO"
+    debug_cmd "iptables nat MIHOMO" sh -c "iptables -t nat -S 2>/dev/null | grep MIHOMO"
+    debug_cmd "wan ip addresses" sh -c "nvram show 2>/dev/null | grep -E '^(wan|wan[0-9]+)_ipaddr=' | grep -v '_x='"
+    debug_cmd "ip rule" sh -c "ip rule show 2>/dev/null | grep '$ROUTE_TABLE'"
+    debug_cmd "ip route table" sh -c "ip route show table '$ROUTE_TABLE' 2>/dev/null"
+    [ -f "$LOG_FILE" ] && debug_cmd "last 80 mihomo core log lines" tail -80 "$LOG_FILE"
 }
 
 get_uname() {
@@ -98,6 +141,7 @@ get_uname() {
 die() {
     print_message "ERROR" "$1"
     logger -t mihomo "ERROR: $1"
+    debug_log "ERROR: $1"
     exit 1
 }
 
@@ -374,6 +418,21 @@ flush_rules() {
     iptables -t nat -X "$NAT_CHAIN" 2>/dev/null
 }
 
+get_wan_ips() {
+    nvram show 2>/dev/null | grep -E '^(wan|wan[0-9]+)_ipaddr=[1-9]' | grep -v '_x=' | cut -d= -f2
+}
+
+add_wan_bypass_rules() {
+    chain="$1"
+    for ip in $(get_wan_ips); do
+        case "$ip" in
+            ''|0.0.0.0) continue ;;
+        esac
+        iptables -t mangle -A "$chain" -d "$ip" -j RETURN
+        debug_log "bypass WAN destination ip=$ip"
+    done
+}
+
 add_bypass_rules() {
     chain="$1"
     iptables -t mangle -A "$chain" -d 0.0.0.0/8 -j RETURN
@@ -385,6 +444,8 @@ add_bypass_rules() {
     iptables -t mangle -A "$chain" -d 192.168.0.0/16 -j RETURN
     iptables -t mangle -A "$chain" -d 224.0.0.0/4 -j RETURN
     iptables -t mangle -A "$chain" -d 240.0.0.0/4 -j RETURN
+    iptables -t mangle -A "$chain" -d 255.255.255.255/32 -j RETURN
+    add_wan_bypass_rules "$chain"
 }
 
 add_exclude_rules() {
@@ -529,6 +590,30 @@ apply_rules() {
     log "rules applied: mode=tproxy tproxy_port=$tproxy_port dns_port=$dns_port table=$ROUTE_TABLE mark=$FW_MARK"
 }
 
+start_core_supervised() {
+    cfg="$1"
+    rm -f "$STOP_FLAG_FILE" "$PID_FILE" "$SUPERVISOR_PID_FILE"
+    debug_log "supervisor starting core config=$cfg"
+    (
+        "$MIHOMO_BIN" -d "$MIHOMO_HOME" -f "$cfg" >> "$LOG_FILE" 2>&1 &
+        core_pid="$!"
+        echo "$core_pid" > "$PID_FILE"
+        debug_log "core started pid=$core_pid"
+        wait "$core_pid"
+        rc="$?"
+        if [ -f "$STOP_FLAG_FILE" ]; then
+            debug_log "core stopped by script pid=$core_pid rc=$rc"
+        else
+            debug_log "core exited unexpectedly pid=$core_pid rc=$rc"
+            debug_snapshot "unexpected core exit rc=$rc"
+        fi
+        rm -f "$PID_FILE" "$SUPERVISOR_PID_FILE" "$STOP_FLAG_FILE"
+    ) &
+    echo "$!" > "$SUPERVISOR_PID_FILE"
+    current_supervisor_pid="$(cat "$SUPERVISOR_PID_FILE" 2>/dev/null)"
+    debug_log "supervisor pid=$current_supervisor_pid"
+}
+
 start_mihomo() {
     ensure_dirs
     ensure_alias
@@ -540,37 +625,46 @@ start_mihomo() {
     load_kernel_modules
 
     log "starting mihomo with $cfg"
-    "$MIHOMO_BIN" -d "$MIHOMO_HOME" -f "$cfg" >> "$LOG_FILE" 2>&1 &
-    echo "$!" > "$PID_FILE"
+    debug_snapshot "before start"
+    start_core_supervised "$cfg"
     sleep 3
-    is_running || die "mihomo failed to start; check $LOG_FILE"
+    if ! is_running; then
+        debug_snapshot "start failed"
+        die "mihomo failed to start; check $LOG_FILE and $DEBUG_LOG_FILE"
+    fi
 
     apply_rules
     install_hooks
+    debug_snapshot "after start"
     log "mihomo started in tproxy mode"
 }
 
 stop_mihomo() {
     cleanup_hooks
     flush_rules
+    touch "$STOP_FLAG_FILE" 2>/dev/null
+    debug_log "stop requested"
 
     if ! is_running; then
-        rm -f "$PID_FILE" "$MODE_FILE"
+        rm -f "$PID_FILE" "$SUPERVISOR_PID_FILE" "$STOP_FLAG_FILE" "$MODE_FILE"
         log "mihomo stopped"
         return 0
     fi
 
     mihomo_pids | sort -u | while read pid; do
+        debug_log "sending TERM to pid=$pid"
         kill "$pid" 2>/dev/null
     done
     if ! wait_stopped 10; then
         mihomo_pids | sort -u | while read pid; do
+            debug_log "sending KILL to pid=$pid"
             kill -9 "$pid" 2>/dev/null
         done
-        wait_stopped 3 || die "cannot stop mihomo process"
+        wait_stopped 3 || { debug_snapshot "cannot stop process"; die "cannot stop mihomo process"; }
     fi
 
-    rm -f "$PID_FILE" "$MODE_FILE"
+    sleep 1
+    rm -f "$PID_FILE" "$SUPERVISOR_PID_FILE" "$STOP_FLAG_FILE" "$MODE_FILE"
     log "mihomo stopped"
 }
 
@@ -708,6 +802,9 @@ status_mihomo() {
     [ -n "$version" ] && print_message "INFO" "version: $version"
     cfg="$(config_file 2>/dev/null)"
     [ -n "$cfg" ] && print_message "INFO" "config: $cfg"
+    print_message "INFO" "core log: $LOG_FILE"
+    print_message "INFO" "debug log: $DEBUG_LOG_FILE"
+    debug_log "status requested state=$state"
 }
 
 pause_enter() {
@@ -794,6 +891,7 @@ usage_mihomo() {
     printf '  mihomo stop          stop Mihomo and remove routing rules\n'
     printf '  mihomo restart       restart Mihomo\n'
     printf '  mihomo status        show core state and architecture\n'
+    printf '  mihomo debug         write diagnostic snapshot to debug log\n'
     printf '  mihomo update        update Mihomo core if a new version exists\n'
     printf '\n'
     print_message "ACTION" "Routing lists"
@@ -814,7 +912,8 @@ main_menu() {
         printf '  4) Restart\n'
         printf '  5) Update core\n'
         printf '  6) Routing setup\n'
-        printf '  7) Show commands\n'
+        printf '  7) Write debug snapshot\n'
+        printf '  8) Show commands\n'
         printf '  0) Exit\n'
         printf '\nSelect option: '
         read choice
@@ -825,7 +924,8 @@ main_menu() {
             4) stop_mihomo; sleep 2; start_mihomo; pause_enter ;;
             5) update_mihomo; pause_enter ;;
             6) setup_mihomo ;;
-            7) usage_mihomo; pause_enter ;;
+            7) debug_snapshot "manual debug menu"; print_message "INFO" "debug written to $DEBUG_LOG_FILE"; pause_enter ;;
+            8) usage_mihomo; pause_enter ;;
             0) exit 0 ;;
             *) print_message "WARN" "unknown option" ;;
         esac
@@ -848,6 +948,7 @@ case "$1" in
     stop) stop_mihomo ;;
     restart) stop_mihomo; sleep 2; start_mihomo ;;
     status) status_mihomo ;;
+    debug) ensure_dirs; debug_snapshot "manual debug command"; print_message "INFO" "debug written to $DEBUG_LOG_FILE" ;;
     update) update_mihomo ;;
     setup) setup_mihomo ;;
     exclude) shift; exclude_mihomo "$@" ;;
