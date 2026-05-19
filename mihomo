@@ -876,7 +876,7 @@ usage_mihomo() {
     printf '  mihomo stop          stop Mihomo and remove routing rules\n'
     printf '  mihomo restart       restart Mihomo\n'
     printf '  mihomo status        show core state and architecture\n'
-    printf '  mihomo log           follow Mihomo core log until Ctrl+C\n'
+    printf '  mihomo logs          follow Mihomo core log until Ctrl+C\n'
     printf '  mihomo update        update Mihomo core if a new version exists\n'
     printf '\n'
     print_message "ACTION" "Routing lists"
@@ -934,7 +934,7 @@ case "$1" in
     stop) stop_mihomo ;;
     restart) stop_mihomo; sleep 2; start_mihomo ;;
     status) status_mihomo ;;
-    log) log_mihomo ;;
+    log|logs) log_mihomo ;;
     update) update_mihomo ;;
     setup) setup_mihomo ;;
     exclude) shift; exclude_mihomo "$@" ;;
