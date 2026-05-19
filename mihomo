@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # Minimal Mihomo TProxy runner for ASUSWRT-Merlin + Entware.
-# Public commands: install, start, stop, restart, status, update, setup, include, exclude, uninstall.
+# Public commands: install, start, stop, restart, status, log, update, setup, include, exclude, uninstall.
 
 MIHOMO_SCRIPT_DEPTH="${MIHOMO_SCRIPT_DEPTH:-0}"
 MIHOMO_SCRIPT_DEPTH=$((MIHOMO_SCRIPT_DEPTH + 1))
@@ -17,6 +17,7 @@ CONFIG_DIR="${CONFIG_DIR:-$MIHOMO_HOME/config}"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
 RUN_DIR="${RUN_DIR:-$MIHOMO_HOME/run}"
 LOG_FILE="${LOG_FILE:-$MIHOMO_HOME/mihomo.log}"
+LOG_MAX_BYTES="${LOG_MAX_BYTES:-3145728}"
 DOWNLOAD_DIR="${DOWNLOAD_DIR:-$MIHOMO_HOME/download}"
 
 SCRIPT_PATH="${SCRIPT_PATH:-/jffs/addons/mihomo/mihomo}"
@@ -37,6 +38,7 @@ TAG="mihomo-script"
 MANGLE_CHAIN="MIHOMO-MANGLE"
 NAT_CHAIN="MIHOMO-NAT"
 PID_FILE="$RUN_DIR/mihomo.pid"
+LOG_GUARD_PID_FILE="$RUN_DIR/mihomo-log-guard.pid"
 MODE_FILE="$RUN_DIR/mode"
 
 if [ -t 1 ]; then
@@ -73,7 +75,7 @@ print_message() {
 
 log() {
     print_message "INFO" "$1"
-    logger -t mihomo "$1"
+    printf '%s\n' "$1" | logger -t mihomo
 }
 
 get_uname() {
@@ -97,8 +99,48 @@ get_uname() {
 
 die() {
     print_message "ERROR" "$1"
-    logger -t mihomo "ERROR: $1"
+    printf '%s\n' "ERROR: $1" | logger -t mihomo
     exit 1
+}
+
+log_size() {
+    [ -f "$LOG_FILE" ] || { echo 0; return 0; }
+    wc -c < "$LOG_FILE" 2>/dev/null || echo 0
+}
+
+clear_core_log() {
+    rm -f "$LOG_FILE" 2>/dev/null
+}
+
+enforce_log_size() {
+    size="$(log_size)"
+    case "$size" in
+        ''|*[!0-9]*) size=0 ;;
+    esac
+    if [ "$size" -gt "$LOG_MAX_BYTES" ] 2>/dev/null; then
+        : > "$LOG_FILE" 2>/dev/null
+        printf '%s\n' "mihomo log truncated: ${size} bytes exceeded ${LOG_MAX_BYTES} bytes" | logger -t mihomo
+    fi
+}
+
+start_log_guard() {
+    stop_log_guard
+    (
+        while :; do
+            enforce_log_size
+            sleep 5
+        done
+    ) &
+    echo "$!" > "$LOG_GUARD_PID_FILE"
+}
+
+stop_log_guard() {
+    guard_pid="$(cat "$LOG_GUARD_PID_FILE" 2>/dev/null)"
+    case "$guard_pid" in
+        ''|*[!0-9]*) ;;
+        *) kill "$guard_pid" 2>/dev/null ;;
+    esac
+    rm -f "$LOG_GUARD_PID_FILE"
 }
 
 ensure_dirs() {
@@ -374,6 +416,20 @@ flush_rules() {
     iptables -t nat -X "$NAT_CHAIN" 2>/dev/null
 }
 
+get_wan_ips() {
+    nvram show 2>/dev/null | grep -E '^(wan|wan[0-9]+)_ipaddr=[1-9]' | grep -v '_x=' | cut -d= -f2
+}
+
+add_wan_bypass_rules() {
+    chain="$1"
+    for ip in $(get_wan_ips); do
+        case "$ip" in
+            ''|0.0.0.0) continue ;;
+        esac
+        iptables -t mangle -A "$chain" -d "$ip" -j RETURN
+    done
+}
+
 add_bypass_rules() {
     chain="$1"
     iptables -t mangle -A "$chain" -d 0.0.0.0/8 -j RETURN
@@ -385,6 +441,8 @@ add_bypass_rules() {
     iptables -t mangle -A "$chain" -d 192.168.0.0/16 -j RETURN
     iptables -t mangle -A "$chain" -d 224.0.0.0/4 -j RETURN
     iptables -t mangle -A "$chain" -d 240.0.0.0/4 -j RETURN
+    iptables -t mangle -A "$chain" -d 255.255.255.255/32 -j RETURN
+    add_wan_bypass_rules "$chain"
 }
 
 add_exclude_rules() {
@@ -531,6 +589,9 @@ apply_rules() {
 
 start_mihomo() {
     ensure_dirs
+    rm -f "$MIHOMO_HOME/mihomo-debug.log" "$RUN_DIR/mihomo-supervisor.pid" "$RUN_DIR/stop.flag" 2>/dev/null
+    clear_core_log
+    : > "$LOG_FILE" 2>/dev/null || die "cannot create $LOG_FILE"
     ensure_alias
     cfg="$(config_file)" || die "missing $CONFIG_FILE"
     [ -x "$MIHOMO_BIN" ] || die "missing executable $MIHOMO_BIN"
@@ -542,8 +603,12 @@ start_mihomo() {
     log "starting mihomo with $cfg"
     "$MIHOMO_BIN" -d "$MIHOMO_HOME" -f "$cfg" >> "$LOG_FILE" 2>&1 &
     echo "$!" > "$PID_FILE"
+    start_log_guard
     sleep 3
-    is_running || die "mihomo failed to start; check $LOG_FILE"
+    if ! is_running; then
+        stop_log_guard
+        die "mihomo failed to start; check $LOG_FILE"
+    fi
 
     apply_rules
     install_hooks
@@ -553,9 +618,11 @@ start_mihomo() {
 stop_mihomo() {
     cleanup_hooks
     flush_rules
+    stop_log_guard
 
     if ! is_running; then
         rm -f "$PID_FILE" "$MODE_FILE"
+        clear_core_log
         log "mihomo stopped"
         return 0
     fi
@@ -571,11 +638,13 @@ stop_mihomo() {
     fi
 
     rm -f "$PID_FILE" "$MODE_FILE"
+    clear_core_log
     log "mihomo stopped"
 }
 
 install_mihomo() {
     ensure_dirs
+    rm -f "$MIHOMO_HOME/mihomo-debug.log" "$RUN_DIR/mihomo-supervisor.pid" "$RUN_DIR/stop.flag" 2>/dev/null
     install_script
     install_core
     log "mihomo installed"
@@ -591,7 +660,7 @@ exclude_mihomo() {
         clear)
             : > "$EXCLUDE_FILE"
             print_message "SUCCESS" "excluded IP list cleared"
-            logger -t mihomo "excluded IP list cleared"
+            printf '%s\n' "excluded IP list cleared" | logger -t mihomo
             is_running && apply_rules
             ;;
         add)
@@ -599,7 +668,7 @@ exclude_mihomo() {
             [ "$#" -gt 0 ] || die "usage: mihomo exclude add <ip-or-cidr> [more...]"
             append_list_items "$EXCLUDE_FILE" "$@"
             print_message "SUCCESS" "excluded IP list updated"
-            logger -t mihomo "excluded IP list updated"
+            printf '%s\n' "excluded IP list updated" | logger -t mihomo
             is_running && apply_rules
             ;;
         del|delete|remove)
@@ -607,7 +676,7 @@ exclude_mihomo() {
             [ "$#" -gt 0 ] || die "usage: mihomo exclude del <ip-or-cidr> [more...]"
             delete_list_items "$EXCLUDE_FILE" "$@"
             print_message "SUCCESS" "excluded IP list updated"
-            logger -t mihomo "excluded IP list updated"
+            printf '%s\n' "excluded IP list updated" | logger -t mihomo
             is_running && apply_rules
             ;;
         set)
@@ -615,7 +684,7 @@ exclude_mihomo() {
             : > "$EXCLUDE_FILE"
             append_list_items "$EXCLUDE_FILE" "$@"
             print_message "SUCCESS" "excluded IP list updated"
-            logger -t mihomo "excluded IP list updated"
+            printf '%s\n' "excluded IP list updated" | logger -t mihomo
             is_running && apply_rules
             ;;
         *)
@@ -634,7 +703,7 @@ include_mihomo() {
         clear)
             : > "$INCLUDE_FILE"
             print_message "SUCCESS" "included IP list cleared"
-            logger -t mihomo "included IP list cleared"
+            printf '%s\n' "included IP list cleared" | logger -t mihomo
             is_running && apply_rules
             ;;
         add)
@@ -642,7 +711,7 @@ include_mihomo() {
             [ "$#" -gt 0 ] || die "usage: mihomo include add <ip-or-cidr> [more...]"
             append_list_items "$INCLUDE_FILE" "$@"
             print_message "SUCCESS" "included IP list updated"
-            logger -t mihomo "included IP list updated"
+            printf '%s\n' "included IP list updated" | logger -t mihomo
             is_running && apply_rules
             ;;
         del|delete|remove)
@@ -650,7 +719,7 @@ include_mihomo() {
             [ "$#" -gt 0 ] || die "usage: mihomo include del <ip-or-cidr> [more...]"
             delete_list_items "$INCLUDE_FILE" "$@"
             print_message "SUCCESS" "included IP list updated"
-            logger -t mihomo "included IP list updated"
+            printf '%s\n' "included IP list updated" | logger -t mihomo
             is_running && apply_rules
             ;;
         set)
@@ -658,7 +727,7 @@ include_mihomo() {
             : > "$INCLUDE_FILE"
             append_list_items "$INCLUDE_FILE" "$@"
             print_message "SUCCESS" "included IP list updated"
-            logger -t mihomo "included IP list updated"
+            printf '%s\n' "included IP list updated" | logger -t mihomo
             is_running && apply_rules
             ;;
         *)
@@ -708,6 +777,19 @@ status_mihomo() {
     [ -n "$version" ] && print_message "INFO" "version: $version"
     cfg="$(config_file 2>/dev/null)"
     [ -n "$cfg" ] && print_message "INFO" "config: $cfg"
+    print_message "INFO" "core log: $LOG_FILE"
+    print_message "INFO" "core log limit: $LOG_MAX_BYTES bytes"
+}
+
+log_mihomo() {
+    ensure_dirs
+    if [ ! -f "$LOG_FILE" ]; then
+        : > "$LOG_FILE" || die "cannot create $LOG_FILE"
+    fi
+    enforce_log_size
+    print_message "INFO" "showing $LOG_FILE; press Ctrl+C to stop"
+    cat "$LOG_FILE"
+    tail -n 0 -f "$LOG_FILE"
 }
 
 pause_enter() {
@@ -794,6 +876,7 @@ usage_mihomo() {
     printf '  mihomo stop          stop Mihomo and remove routing rules\n'
     printf '  mihomo restart       restart Mihomo\n'
     printf '  mihomo status        show core state and architecture\n'
+    printf '  mihomo logs          follow Mihomo core log until Ctrl+C\n'
     printf '  mihomo update        update Mihomo core if a new version exists\n'
     printf '\n'
     print_message "ACTION" "Routing lists"
@@ -814,7 +897,8 @@ main_menu() {
         printf '  4) Restart\n'
         printf '  5) Update core\n'
         printf '  6) Routing setup\n'
-        printf '  7) Show commands\n'
+        printf '  7) Show core log\n'
+        printf '  8) Show commands\n'
         printf '  0) Exit\n'
         printf '\nSelect option: '
         read choice
@@ -825,7 +909,8 @@ main_menu() {
             4) stop_mihomo; sleep 2; start_mihomo; pause_enter ;;
             5) update_mihomo; pause_enter ;;
             6) setup_mihomo ;;
-            7) usage_mihomo; pause_enter ;;
+            7) log_mihomo ;;
+            8) usage_mihomo; pause_enter ;;
             0) exit 0 ;;
             *) print_message "WARN" "unknown option" ;;
         esac
@@ -834,6 +919,7 @@ main_menu() {
 
 uninstall_mihomo() {
     stop_mihomo
+    stop_log_guard
     rm -rf "$MIHOMO_HOME"
     rm -f "$SCRIPT_PATH" "$LN_PATH"
     [ -f /jffs/configs/profile.add ] && sed -i "/alias mihomo=.*mihomo/d" /jffs/configs/profile.add
@@ -848,6 +934,7 @@ case "$1" in
     stop) stop_mihomo ;;
     restart) stop_mihomo; sleep 2; start_mihomo ;;
     status) status_mihomo ;;
+    log|logs) log_mihomo ;;
     update) update_mihomo ;;
     setup) setup_mihomo ;;
     exclude) shift; exclude_mihomo "$@" ;;
