@@ -1,5 +1,8 @@
-# Minimal mihomo4asus config example.
+# Minimal mihomo4asus config example for fake-ip mode.
 # Copy this file to /opt/root/mihomo/config/config.yaml and replace proxy placeholders.
+# Fake-IP captures domain traffic through 198.18.0.0/15.
+# Apps that connect directly to real IP ranges need /opt/root/mihomo/config/fakeip-dst.list.
+# Real UDP port ranges, for example Discord voice, can use /opt/root/mihomo/config/fakeip-port.list.
 
 mode: rule
 log-level: info
@@ -22,14 +25,15 @@ external-ui-url: "https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-p
 
 profile:
   store-selected: true
-  store-fake-ip: false
+  store-fake-ip: true
 
 dns:
   enable: true
   listen: 0.0.0.0:1053
   ipv6: false
-  enhanced-mode: redir-host
   use-hosts: true
+
+
   default-nameserver:
     - 1.1.1.1
     - 8.8.8.8
@@ -37,8 +41,8 @@ dns:
     - https://1.1.1.1/dns-query
     - https://8.8.8.8/dns-query
   proxy-server-nameserver:
-    - https://1.1.1.1/dns-query
-    - https://8.8.8.8/dns-query
+    - 1.1.1.1
+    - 8.8.8.8
   direct-nameserver:
     - 77.88.8.8
     - 8.8.8.8
