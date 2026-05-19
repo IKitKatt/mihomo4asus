@@ -245,6 +245,27 @@ detect_dns_port() {
     fi
 }
 
+detect_fake_ip_range() {
+    file="$1"
+    dns_enable="$(yaml_block_value dns enable "$file" | tr 'A-Z' 'a-z')"
+    enhanced_mode="$(yaml_block_value dns enhanced-mode "$file" | tr 'A-Z' 'a-z')"
+    fake_range="$(yaml_block_value dns fake-ip-range "$file")"
+
+    [ "$dns_enable" = "true" ] || return 1
+    [ "$enhanced_mode" = "fake-ip" ] || return 1
+    [ -n "$fake_range" ] || fake_range="198.18.0.0/15"
+
+    case "$fake_range" in
+        */*) ;;
+        *) return 1 ;;
+    esac
+    case "$fake_range" in
+        *[!0-9./]*) return 1 ;;
+    esac
+
+    echo "$fake_range"
+}
+
 cleanup_hooks() {
     [ -f "$NAT_SCRIPT" ] && sed -i "/$TAG/d" "$NAT_SCRIPT"
     [ -f "$FW_SCRIPT" ] && sed -i "/$TAG/d" "$FW_SCRIPT"
@@ -516,24 +537,26 @@ apply_mihomo_target() {
     chain="$1"
     src="$2"
     tproxy_port="$3"
+    fake_ip_range="$4"
 
     src_arg=""
     [ -n "$src" ] && src_arg="-s $src"
 
-    iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -p tcp -j TPROXY --on-port "$tproxy_port" --tproxy-mark "$FW_MARK"
-    iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -p udp -j TPROXY --on-port "$tproxy_port" --tproxy-mark "$FW_MARK"
+    iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -d "$fake_ip_range" -p tcp -j TPROXY --on-port "$tproxy_port" --tproxy-mark "$FW_MARK"
+    iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -d "$fake_ip_range" -p udp -j TPROXY --on-port "$tproxy_port" --tproxy-mark "$FW_MARK"
 }
 
 add_mihomo_route_rules() {
     chain="$1"
     tproxy_port="$2"
+    fake_ip_range="$3"
 
     if has_include_rules; then
         list_items "$INCLUDE_FILE" | while read item; do
-            apply_mihomo_target "$chain" "$item" "$tproxy_port"
+            apply_mihomo_target "$chain" "$item" "$tproxy_port" "$fake_ip_range"
         done
     else
-        apply_mihomo_target "$chain" "" "$tproxy_port"
+        apply_mihomo_target "$chain" "" "$tproxy_port" "$fake_ip_range"
     fi
 }
 
@@ -564,6 +587,7 @@ apply_rules() {
     cfg="$(config_file)" || die "missing $CONFIG_FILE"
     tproxy_port="$(detect_tproxy_port "$cfg")" || die "config $cfg must contain numeric tproxy-port, for example: tproxy-port: 7894"
     dns_port="$(detect_dns_port "$cfg")"
+    fake_ip_range="$(detect_fake_ip_range "$cfg")" || die "config $cfg must enable dns fake-ip and contain valid fake-ip-range"
 
     flush_rules
     load_kernel_modules
@@ -578,13 +602,13 @@ apply_rules() {
     iptables -t mangle -A "$MANGLE_CHAIN" -i "$LAN_IF" -p tcp --dport 53 -j RETURN
     iptables -t mangle -A "$MANGLE_CHAIN" -i "$LAN_IF" -p udp --dport 53 -j RETURN
 
-    add_mihomo_route_rules "$MANGLE_CHAIN" "$tproxy_port"
+    add_mihomo_route_rules "$MANGLE_CHAIN" "$tproxy_port" "$fake_ip_range"
     ip route add local 0.0.0.0/0 dev lo table "$ROUTE_TABLE" 2>/dev/null
 
     ip rule add fwmark "$FW_MARK" lookup "$ROUTE_TABLE" priority "$RULE_PRIORITY" 2>/dev/null
     apply_dns_redirect "$dns_port"
     echo "tproxy" > "$MODE_FILE"
-    log "rules applied: mode=tproxy tproxy_port=$tproxy_port dns_port=$dns_port table=$ROUTE_TABLE mark=$FW_MARK"
+    log "rules applied: mode=tproxy fake-ip fake_ip_range=$fake_ip_range tproxy_port=$tproxy_port dns_port=$dns_port table=$ROUTE_TABLE mark=$FW_MARK"
 }
 
 start_mihomo() {
@@ -598,6 +622,7 @@ start_mihomo() {
     is_running && die "mihomo is already running"
 
     detect_tproxy_port "$cfg" >/dev/null || die "config $cfg must contain numeric tproxy-port, for example: tproxy-port: 7894"
+    detect_fake_ip_range "$cfg" >/dev/null || die "config $cfg must enable dns fake-ip and contain valid fake-ip-range"
     load_kernel_modules
 
     log "starting mihomo with $cfg"
