@@ -1,8 +1,8 @@
-# Minimal mihomo4asus config example for fake-ip mode.
+# Minimal mihomo4asus config example.
 # Copy this file to /opt/root/mihomo/config/config.yaml and replace proxy placeholders.
 
 mode: rule
-log-level: error
+log-level: info
 ipv6: false
 allow-lan: true
 unified-delay: true
@@ -15,30 +15,21 @@ tproxy-port: 7894
 # Open Zashboard after start:
 #   http://<router-ip>:9090/ui
 external-controller: 0.0.0.0:9090
-external-ui: ./ui
+secret: "change-me"
+external-ui: ui
 external-ui-name: zashboard
 external-ui-url: "https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.zip"
 
 profile:
   store-selected: true
-  store-fake-ip: true
+  store-fake-ip: false
 
 dns:
   enable: true
   listen: 0.0.0.0:1053
   ipv6: false
-  enhanced-mode: fake-ip
-  fake-ip-range: 198.18.0.0/15
+  enhanced-mode: redir-host
   use-hosts: true
-
-  # Domains listed here receive real IP addresses and bypass fake-ip TProxy capture.
-  # Add your local/home-server domains here if they must stay outside Mihomo.
-  fake-ip-filter:
-    - "*.lan"
-    - "*.local"
-    - "*.home.arpa"
-    - "router.asus.com"
-
   default-nameserver:
     - 1.1.1.1
     - 8.8.8.8
@@ -70,6 +61,9 @@ proxies:
     servername: example.com
     client-fingerprint: chrome
 
+  - name: DNS-OUT
+    type: dns
+
 proxy-groups:
   - name: PROXY
     type: select
@@ -87,6 +81,7 @@ proxy-groups:
       - Proxy
 
 rules:
+  - DST-PORT,53,DNS-OUT
   - IP-CIDR,0.0.0.0/8,DIRECT,no-resolve
   - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
   - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
