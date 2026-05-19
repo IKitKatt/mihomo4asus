@@ -36,6 +36,7 @@ old/*
 # Project-local files
 config.yaml
 install.sh
+include.list
 
 # Old folder
 old/
