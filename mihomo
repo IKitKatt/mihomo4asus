@@ -207,11 +207,16 @@ yaml_block_value() {
         in_block && $0 ~ "^[[:space:]]+" key ":[[:space:]]*" {
             sub("^[[:space:]]+" key ":[[:space:]]*", "")
             sub("[[:space:]]#.*$", "")
-            gsub(/^["'\'' ]+|["'\'' ]+$/, "")
+            gsub(/\r$/, "")
+            gsub(/^["'\'' \t]+|["'\'' \t]+$/, "")
             print
             exit
         }
     ' "$file"
+}
+
+clean_scalar() {
+    printf '%s' "$1" | sed 's/\r$//;s/^[ 	"]*//;s/[ 	"]*$//'
 }
 
 detect_tproxy_port() {
@@ -247,9 +252,11 @@ detect_dns_port() {
 
 detect_fake_ip_range() {
     file="$1"
-    dns_enable="$(yaml_block_value dns enable "$file" | tr 'A-Z' 'a-z')"
-    enhanced_mode="$(yaml_block_value dns enhanced-mode "$file" | tr 'A-Z' 'a-z')"
-    fake_range="$(yaml_block_value dns fake-ip-range "$file")"
+    dns_enable="$(clean_scalar "$(yaml_block_value dns enable "$file")" | tr 'A-Z' 'a-z')"
+    enhanced_mode="$(clean_scalar "$(yaml_block_value dns enhanced-mode "$file")" | tr 'A-Z' 'a-z')"
+    [ -n "$enhanced_mode" ] || enhanced_mode="$(clean_scalar "$(yaml_block_value dns enhanced_mode "$file")" | tr 'A-Z' 'a-z')"
+    fake_range="$(clean_scalar "$(yaml_block_value dns fake-ip-range "$file")")"
+    [ -n "$fake_range" ] || fake_range="$(clean_scalar "$(yaml_block_value dns fake_ip_range "$file")")"
 
     [ "$dns_enable" = "true" ] || return 1
     [ "$enhanced_mode" = "fake-ip" ] || return 1
