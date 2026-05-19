@@ -72,6 +72,7 @@ mihomo restart
 - `mihomo stop` — stops Mihomo and removes routing rules.
 - `mihomo restart` — restarts Mihomo.
 - `mihomo status` — shows current state, architecture, core path, version, and config path.
+- `mihomo logs` — follows the Mihomo core log until `Ctrl+C`.
 - `mihomo update` — checks the latest Mihomo release, replaces the core if needed, and starts Mihomo again.
 - `mihomo setup` — opens interactive include/exclude IP setup.
 - `mihomo uninstall` — removes Mihomo core, config folder, runtime files, hook lines, command symlink, and routing rules.
@@ -136,5 +137,3 @@ mihomo exclude clear
 - [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) for the Mihomo core.
 - [Dr4tez/sing-box4asus](https://github.com/Dr4tez/sing-box4asus) for the original ASUSWRT-Merlin script approach.
 - [Zephyruso/zashboard](https://github.com/Zephyruso/zashboard) for perfect dashboard
-
-
