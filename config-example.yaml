@@ -2,7 +2,7 @@
 # Copy this file to /opt/root/mihomo/config/config.yaml and replace proxy placeholders.
 
 mode: rule
-log-level: info
+log-level: error
 ipv6: false
 allow-lan: true
 unified-delay: true
@@ -21,7 +21,7 @@ external-ui-url: "https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-p
 
 profile:
   store-selected: true
-  store-fake-ip: false
+  store-fake-ip: true
 
 dns:
   enable: true
