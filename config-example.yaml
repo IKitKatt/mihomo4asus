@@ -61,9 +61,6 @@ proxies:
     servername: example.com
     client-fingerprint: chrome
 
-  - name: DNS-OUT
-    type: dns
-
 proxy-groups:
   - name: PROXY
     type: select
@@ -81,7 +78,6 @@ proxy-groups:
       - Proxy
 
 rules:
-  - DST-PORT,53,DNS-OUT
   - IP-CIDR,0.0.0.0/8,DIRECT,no-resolve
   - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
   - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
