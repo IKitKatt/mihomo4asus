@@ -74,8 +74,36 @@ mihomo restart
 - `mihomo status` — shows current state, architecture, core path, version, and config path.
 - `mihomo logs` — follows the Mihomo core log until `Ctrl+C`.
 - `mihomo update` — checks the latest Mihomo release, replaces the core if needed, and starts Mihomo again.
+- `mihomo subscription` — manages a remote Mihomo YAML subscription config.
 - `mihomo setup` — opens interactive include/exclude IP setup.
 - `mihomo uninstall` — removes Mihomo core, config folder, runtime files, hook lines, command symlink, and routing rules.
+
+## Subscription Config
+
+`mihomo4asus` can download a user Mihomo config from a subscription URL, send Remnawave HWID headers, and refresh it every N hours while Mihomo is running.
+
+Configure a subscription:
+
+```sh
+mihomo subscription set "https://example.com/subscription.yaml" 12
+```
+
+Update immediately:
+
+```sh
+mihomo subscription update
+```
+
+Show or disable subscription settings:
+
+```sh
+mihomo subscription show
+mihomo subscription clear
+```
+
+The downloader sends `x-hwid`, `x-device-os`, `x-ver-os`, `x-device-model`, and `user-agent: mihomo4asus/0.0.3`. The HWID is a SHA-256 hash from firmware version, router model, and a stable first-use date.
+
+When a downloaded config is applied, the script preserves local operational settings required for `mihomo4asus`: `tproxy-port`, UI/controller keys, `dns.listen`, and the full `sniffer` section. Other sections from the subscription config replace the local config.
 
 ## Include And Exclude Lists
 
