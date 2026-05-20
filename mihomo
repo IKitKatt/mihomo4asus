@@ -19,6 +19,7 @@ RUN_DIR="${RUN_DIR:-$MIHOMO_HOME/run}"
 LOG_FILE="${LOG_FILE:-$MIHOMO_HOME/mihomo.log}"
 LOG_MAX_BYTES="${LOG_MAX_BYTES:-3145728}"
 DOWNLOAD_DIR="${DOWNLOAD_DIR:-$MIHOMO_HOME/download}"
+SCRIPT_VERSION="${SCRIPT_VERSION:-0.0.3}"
 
 SCRIPT_PATH="${SCRIPT_PATH:-/jffs/addons/mihomo/mihomo}"
 LN_PATH="${LN_PATH:-/opt/bin/mihomo}"
@@ -39,6 +40,10 @@ MANGLE_CHAIN="MIHOMO-MANGLE"
 NAT_CHAIN="MIHOMO-NAT"
 PID_FILE="$RUN_DIR/mihomo.pid"
 LOG_GUARD_PID_FILE="$RUN_DIR/mihomo-log-guard.pid"
+SUBSCRIPTION_PID_FILE="$RUN_DIR/mihomo-subscription.pid"
+SUBSCRIPTION_SETTINGS_FILE="$CONFIG_DIR/subscription.conf"
+SUBSCRIPTION_LAST_FILE="$CONFIG_DIR/subscription.last"
+SUBSCRIPTION_HWID_DATE_FILE="$CONFIG_DIR/hwid.date"
 MODE_FILE="$RUN_DIR/mode"
 
 if [ -t 1 ]; then
@@ -143,6 +148,32 @@ stop_log_guard() {
     rm -f "$LOG_GUARD_PID_FILE"
 }
 
+start_subscription_updater() {
+    stop_subscription_updater
+    subscription_url="$(subscription_setting url)"
+    [ -n "$subscription_url" ] || return 0
+    subscription_hours="$(subscription_update_hours)"
+    subscription_seconds=$((subscription_hours * 3600))
+
+    (
+        sleep "$subscription_seconds"
+        while :; do
+            MIHOMO_SCRIPT_DEPTH=0 "$SCRIPT_PATH" subscription update-auto >/dev/null 2>&1
+            sleep "$subscription_seconds"
+        done
+    ) &
+    echo "$!" > "$SUBSCRIPTION_PID_FILE"
+}
+
+stop_subscription_updater() {
+    updater_pid="$(cat "$SUBSCRIPTION_PID_FILE" 2>/dev/null)"
+    case "$updater_pid" in
+        ''|*[!0-9]*) ;;
+        *) kill "$updater_pid" 2>/dev/null ;;
+    esac
+    rm -f "$SUBSCRIPTION_PID_FILE"
+}
+
 ensure_dirs() {
     [ -d "$ROOT_DIR" ] || die "Entware root $ROOT_DIR is not available"
     mkdir -p "$MIHOMO_HOME" "$CONFIG_DIR" "$RUN_DIR" || die "cannot create mihomo directories"
@@ -245,6 +276,206 @@ detect_dns_port() {
     fi
 }
 
+top_level_line() {
+    key="$1"
+    file="$2"
+    awk -v key="$key" '
+        $0 ~ "^" key ":[[:space:]]*" {
+            print
+            exit
+        }
+    ' "$file"
+}
+
+has_top_level_key() {
+    key="$1"
+    file="$2"
+    grep -q "^$key:" "$file" 2>/dev/null
+}
+
+has_top_level_block() {
+    key="$1"
+    file="$2"
+    awk -v key="$key" '
+        $0 ~ "^" key ":[[:space:]]*($|#)" { found=1; exit }
+        END { exit found ? 0 : 1 }
+    ' "$file"
+}
+
+extract_top_level_block() {
+    key="$1"
+    file="$2"
+    awk -v key="$key" '
+        $0 ~ "^" key ":[[:space:]]*($|#)" {
+            in_block=1
+            print
+            next
+        }
+        in_block && $0 ~ "^[^[:space:]#][^:]*:[[:space:]]*" { exit }
+        in_block { print }
+    ' "$file"
+}
+
+replace_top_level_key() {
+    key="$1"
+    line="$2"
+    file="$3"
+    tmp="$file.key.$$"
+
+    awk -v key="$key" -v line="$line" '
+        $0 ~ "^" key ":[[:space:]]*" {
+            if (!done) print line
+            done=1
+            next
+        }
+        { print }
+        END {
+            if (!done) print line
+        }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+remove_top_level_key() {
+    key="$1"
+    file="$2"
+    tmp="$file.rmkey.$$"
+
+    awk -v key="$key" '
+        $0 ~ "^" key ":[[:space:]]*" { next }
+        { print }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+replace_top_level_block() {
+    key="$1"
+    block_file="$2"
+    file="$3"
+    tmp="$file.block.$$"
+
+    awk -v key="$key" -v block_file="$block_file" '
+        function print_block() {
+            while ((getline block_line < block_file) > 0) print block_line
+            close(block_file)
+        }
+        $0 ~ "^" key ":[[:space:]]*" {
+            if (!done) print_block()
+            done=1
+            skip=1
+            next
+        }
+        skip && $0 ~ "^[^[:space:]#][^:]*:[[:space:]]*" {
+            skip=0
+        }
+        skip { next }
+        { print }
+        END {
+            if (!done) print_block()
+        }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+remove_top_level_block() {
+    key="$1"
+    file="$2"
+    tmp="$file.rmblock.$$"
+
+    awk -v key="$key" '
+        $0 ~ "^" key ":[[:space:]]*" {
+            skip=1
+            next
+        }
+        skip && $0 ~ "^[^[:space:]#][^:]*:[[:space:]]*" {
+            skip=0
+        }
+        skip { next }
+        { print }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+replace_dns_listen() {
+    listen_line="$1"
+    file="$2"
+    tmp="$file.dns.$$"
+
+    awk -v listen_line="$listen_line" '
+        /^dns:[[:space:]]*($|#)/ {
+            in_dns=1
+            saw_dns=1
+            print
+            next
+        }
+        in_dns && /^[^[:space:]#][^:]*:[[:space:]]*/ {
+            if (!listen_done) print listen_line
+            in_dns=0
+        }
+        in_dns && /^[[:space:]]+listen:[[:space:]]*/ {
+            if (!listen_done) print listen_line
+            listen_done=1
+            next
+        }
+        { print }
+        END {
+            if (in_dns && !listen_done) print listen_line
+            if (!saw_dns) {
+                print ""
+                print "dns:"
+                print listen_line
+            }
+        }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+preserve_operational_config() {
+    base_file="$1"
+    target_file="$2"
+    tmp_block="$RUN_DIR/preserved-block.$$"
+
+    if [ -f "$base_file" ]; then
+        line="$(top_level_line tproxy-port "$base_file")"
+        [ -n "$line" ] && replace_top_level_key tproxy-port "$line" "$target_file"
+
+        for key in external-controller external-controller-cors external-controller-unix external-controller-tls secret external-ui external-ui-name external-ui-url; do
+            line="$(top_level_line "$key" "$base_file")"
+            if [ -n "$line" ]; then
+                replace_top_level_key "$key" "$line" "$target_file"
+            else
+                remove_top_level_key "$key" "$target_file"
+            fi
+        done
+
+        if has_top_level_block sniffer "$base_file"; then
+            extract_top_level_block sniffer "$base_file" > "$tmp_block"
+            replace_top_level_block sniffer "$tmp_block" "$target_file"
+            rm -f "$tmp_block"
+        else
+            remove_top_level_block sniffer "$target_file"
+        fi
+
+        if has_top_level_block dns "$base_file" && ! has_top_level_block dns "$target_file"; then
+            extract_top_level_block dns "$base_file" > "$tmp_block"
+            replace_top_level_block dns "$tmp_block" "$target_file"
+            rm -f "$tmp_block"
+        fi
+
+        listen="$(yaml_block_value dns listen "$base_file")"
+        if [ -n "$listen" ]; then
+            replace_dns_listen "  listen: $listen" "$target_file"
+        fi
+    else
+        for key in external-controller external-controller-cors external-controller-unix external-controller-tls secret external-ui external-ui-name external-ui-url; do
+            remove_top_level_key "$key" "$target_file"
+        done
+        remove_top_level_block sniffer "$target_file"
+    fi
+
+    if ! has_top_level_key tproxy-port "$target_file"; then
+        replace_top_level_key tproxy-port "tproxy-port: 7894" "$target_file"
+    fi
+    if [ -z "$(yaml_block_value dns listen "$target_file")" ]; then
+        replace_dns_listen "  listen: 0.0.0.0:$DNS_PORT" "$target_file"
+    fi
+}
+
 cleanup_hooks() {
     [ -f "$NAT_SCRIPT" ] && sed -i "/$TAG/d" "$NAT_SCRIPT"
     [ -f "$FW_SCRIPT" ] && sed -i "/$TAG/d" "$FW_SCRIPT"
@@ -269,6 +500,163 @@ download_to_file() {
     dst="$2"
     wget -q -O "$dst" "$url" 2>/dev/null || \
         curl -fsSL -o "$dst" "$url" 2>/dev/null
+}
+
+detect_device_model() {
+    model=""
+    if command -v nvram >/dev/null 2>&1; then
+        model="$(nvram get odmpid 2>/dev/null)"
+        [ -n "$model" ] || model="$(nvram get productid 2>/dev/null)"
+        [ -n "$model" ] || model="$(nvram get model 2>/dev/null)"
+    fi
+    [ -n "$model" ] || model="$(get_uname -n 2>/dev/null)"
+    [ -n "$model" ] || model="unknown"
+    printf '%s\n' "$model"
+}
+
+detect_firmware_version() {
+    firmver=""
+    buildno=""
+    extendno=""
+    if command -v nvram >/dev/null 2>&1; then
+        firmver="$(nvram get firmver 2>/dev/null)"
+        buildno="$(nvram get buildno 2>/dev/null)"
+        extendno="$(nvram get extendno 2>/dev/null)"
+    fi
+
+    if [ -n "$firmver" ] && [ -n "$extendno" ]; then
+        case "$extendno" in
+            "$firmver"*) printf '%s\n' "$extendno"; return 0 ;;
+            *) printf '%s.%s\n' "$firmver" "$extendno"; return 0 ;;
+        esac
+    fi
+    if [ -n "$firmver" ] && [ -n "$buildno" ]; then
+        case "$firmver" in
+            *"$buildno"*) printf '%s\n' "$firmver"; return 0 ;;
+            *) printf '%s.%s\n' "$firmver" "$buildno"; return 0 ;;
+        esac
+    fi
+    [ -n "$firmver" ] && { printf '%s\n' "$firmver"; return 0; }
+    get_uname -r
+}
+
+hwid_date() {
+    if [ -f "$SUBSCRIPTION_HWID_DATE_FILE" ]; then
+        date_value="$(cat "$SUBSCRIPTION_HWID_DATE_FILE" 2>/dev/null)"
+    else
+        date_value="$(date +%Y%m%d 2>/dev/null || date 2>/dev/null || printf 'unknown')"
+        printf '%s\n' "$date_value" > "$SUBSCRIPTION_HWID_DATE_FILE" 2>/dev/null
+    fi
+    [ -n "$date_value" ] || date_value="unknown"
+    printf '%s\n' "$date_value"
+}
+
+hash_hwid_source() {
+    source_text="$1"
+    if command -v sha256sum >/dev/null 2>&1; then
+        printf '%s' "$source_text" | sha256sum | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        printf '%s' "$source_text" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}'
+    elif command -v md5sum >/dev/null 2>&1; then
+        printf '%s' "$source_text" | md5sum | awk '{print $1}'
+    else
+        printf '%s' "$source_text" | cksum | awk '{print $1 $2}'
+    fi
+}
+
+subscription_headers() {
+    device_os="Linux"
+    ver_os="$(detect_firmware_version)"
+    device_model="$(detect_device_model)"
+    date_value="$(hwid_date)"
+    hwid="$(hash_hwid_source "$ver_os$device_model$date_value")"
+    user_agent="mihomo4asus/$SCRIPT_VERSION"
+
+    printf '%s\n' "$hwid"
+    printf '%s\n' "$device_os"
+    printf '%s\n' "$ver_os"
+    printf '%s\n' "$device_model"
+    printf '%s\n' "$user_agent"
+}
+
+download_subscription_to_file() {
+    url="$1"
+    dst="$2"
+    headers="$(subscription_headers)"
+    hwid="$(printf '%s\n' "$headers" | sed -n '1p')"
+    device_os="$(printf '%s\n' "$headers" | sed -n '2p')"
+    ver_os="$(printf '%s\n' "$headers" | sed -n '3p')"
+    device_model="$(printf '%s\n' "$headers" | sed -n '4p')"
+    user_agent="$(printf '%s\n' "$headers" | sed -n '5p')"
+
+    wget -q \
+        --header="x-hwid: $hwid" \
+        --header="x-device-os: $device_os" \
+        --header="x-ver-os: $ver_os" \
+        --header="x-device-model: $device_model" \
+        --header="user-agent: $user_agent" \
+        -O "$dst" "$url" 2>/dev/null || \
+        curl -fsSL \
+            -H "x-hwid: $hwid" \
+            -H "x-device-os: $device_os" \
+            -H "x-ver-os: $ver_os" \
+            -H "x-device-model: $device_model" \
+            -A "$user_agent" \
+            -o "$dst" "$url" 2>/dev/null
+}
+
+subscription_setting() {
+    name="$1"
+    [ -f "$SUBSCRIPTION_SETTINGS_FILE" ] || return 0
+    case "$name" in
+        url) key="URL" ;;
+        hours) key="UPDATE_HOURS" ;;
+        *) return 1 ;;
+    esac
+    grep -m1 "^$key=" "$SUBSCRIPTION_SETTINGS_FILE" 2>/dev/null | sed 's/^[^=]*=//'
+}
+
+subscription_update_hours() {
+    hours="$(subscription_setting hours)"
+    case "$hours" in
+        ''|*[!0-9]*) hours=24 ;;
+    esac
+    [ "$hours" -gt 0 ] 2>/dev/null || hours=24
+    printf '%s\n' "$hours"
+}
+
+save_subscription_settings() {
+    url="$1"
+    hours="$2"
+    case "$hours" in
+        ''|*[!0-9]*) die "subscription update interval must be a positive number of hours" ;;
+    esac
+    [ "$hours" -gt 0 ] 2>/dev/null || die "subscription update interval must be greater than zero"
+    mkdir -p "$CONFIG_DIR" || die "cannot create $CONFIG_DIR"
+    printf 'URL=%s\nUPDATE_HOURS=%s\n' "$url" "$hours" > "$SUBSCRIPTION_SETTINGS_FILE" || die "cannot write $SUBSCRIPTION_SETTINGS_FILE"
+}
+
+subscription_is_due() {
+    hours="$(subscription_update_hours)"
+    seconds=$((hours * 3600))
+    now="$(date +%s 2>/dev/null)"
+    case "$now" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    last="$(cat "$SUBSCRIPTION_LAST_FILE" 2>/dev/null)"
+    case "$last" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    age=$((now - last))
+    [ "$age" -ge "$seconds" ]
+}
+
+touch_subscription_last() {
+    now="$(date +%s 2>/dev/null)"
+    case "$now" in
+        ''|*[!0-9]*) now=0 ;;
+    esac
+    printf '%s\n' "$now" > "$SUBSCRIPTION_LAST_FILE" 2>/dev/null
 }
 
 latest_version() {
@@ -342,6 +730,96 @@ latest_download_url() {
             }
         }
     '
+}
+
+subscription_update_config() {
+    subscription_url="$(subscription_setting url)"
+    [ -n "$subscription_url" ] || return 2
+
+    tmp_raw="$RUN_DIR/subscription.raw.$$"
+    tmp_merged="$RUN_DIR/subscription.merged.$$"
+
+    rm -f "$tmp_raw" "$tmp_merged"
+    log "downloading subscription config"
+    if ! download_subscription_to_file "$subscription_url" "$tmp_raw"; then
+        rm -f "$tmp_raw" "$tmp_merged"
+        log "ERROR: subscription download failed"
+        return 3
+    fi
+    [ -s "$tmp_raw" ] || {
+        rm -f "$tmp_raw" "$tmp_merged"
+        log "ERROR: subscription response is empty"
+        return 3
+    }
+
+    cp "$tmp_raw" "$tmp_merged" || {
+        rm -f "$tmp_raw" "$tmp_merged"
+        log "ERROR: cannot prepare subscription config"
+        return 3
+    }
+    preserve_operational_config "$CONFIG_FILE" "$tmp_merged"
+    detect_tproxy_port "$tmp_merged" >/dev/null || {
+        rm -f "$tmp_raw" "$tmp_merged"
+        log "ERROR: merged subscription config has no valid tproxy-port"
+        return 3
+    }
+
+    if [ -f "$CONFIG_FILE" ] && cmp -s "$CONFIG_FILE" "$tmp_merged" 2>/dev/null; then
+        rm -f "$tmp_raw" "$tmp_merged"
+        touch_subscription_last
+        log "subscription config unchanged"
+        return 1
+    fi
+
+    [ -f "$CONFIG_FILE" ] && cp "$CONFIG_FILE" "$CONFIG_FILE.bak" 2>/dev/null
+    mv "$tmp_merged" "$CONFIG_FILE" || {
+        rm -f "$tmp_raw" "$tmp_merged"
+        log "ERROR: cannot install subscription config"
+        return 3
+    }
+    rm -f "$tmp_raw"
+    touch_subscription_last
+    log "subscription config updated"
+    return 0
+}
+
+subscription_update_if_needed() {
+    [ -n "$(subscription_setting url)" ] || return 0
+    [ -f "$CONFIG_FILE" ] || { subscription_update_config; return 0; }
+    subscription_is_due || return 0
+    subscription_update_config || log "subscription update skipped; keeping current config"
+    return 0
+}
+
+subscription_update_and_reload() {
+    auto="$1"
+    ensure_dirs
+    [ -n "$(subscription_setting url)" ] || {
+        [ "$auto" = "auto" ] && return 0
+        die "subscription URL is not configured"
+    }
+
+    if [ "$auto" = "auto" ] && ! subscription_is_due; then
+        return 0
+    fi
+
+    subscription_update_config
+    result="$?"
+    case "$result" in
+        0) ;;
+        1) return 0 ;;
+        *)
+            [ "$auto" = "auto" ] && return 0
+            die "subscription update failed"
+            ;;
+    esac
+
+    if is_running; then
+        log "restarting mihomo after subscription update"
+        stop_mihomo
+        sleep 2
+        start_mihomo
+    fi
 }
 
 install_core() {
@@ -593,6 +1071,7 @@ start_mihomo() {
     clear_core_log
     : > "$LOG_FILE" 2>/dev/null || die "cannot create $LOG_FILE"
     ensure_alias
+    subscription_update_if_needed
     cfg="$(config_file)" || die "missing $CONFIG_FILE"
     [ -x "$MIHOMO_BIN" ] || die "missing executable $MIHOMO_BIN"
     is_running && die "mihomo is already running"
@@ -612,6 +1091,7 @@ start_mihomo() {
 
     apply_rules
     install_hooks
+    start_subscription_updater
     log "mihomo started in tproxy mode"
 }
 
@@ -619,6 +1099,7 @@ stop_mihomo() {
     cleanup_hooks
     flush_rules
     stop_log_guard
+    stop_subscription_updater
 
     if ! is_running; then
         rm -f "$PID_FILE" "$MODE_FILE"
@@ -737,6 +1218,64 @@ include_mihomo() {
     esac
 }
 
+subscription_mihomo() {
+    ensure_dirs
+    cmd="$1"
+    case "$cmd" in
+        show|"")
+            url="$(subscription_setting url)"
+            hours="$(subscription_update_hours)"
+            if [ -n "$url" ]; then
+                print_message "INFO" "subscription URL: $url"
+                print_message "INFO" "update interval: ${hours}h"
+                last="$(cat "$SUBSCRIPTION_LAST_FILE" 2>/dev/null)"
+                case "$last" in
+                    ''|*[!0-9]*) print_message "INFO" "last update: never" ;;
+                    *) print_message "INFO" "last update epoch: $last" ;;
+                esac
+            else
+                print_message "WARN" "subscription URL is not configured"
+            fi
+            ;;
+        set)
+            shift
+            url="$1"
+            hours="${2:-24}"
+            [ -n "$url" ] || die "usage: mihomo subscription set <url> [hours]"
+            save_subscription_settings "$url" "$hours"
+            print_message "SUCCESS" "subscription settings saved"
+            printf '%s\n' "subscription settings saved" | logger -t mihomo
+            is_running && start_subscription_updater
+            ;;
+        hours|interval)
+            shift
+            url="$(subscription_setting url)"
+            [ -n "$url" ] || die "subscription URL is not configured"
+            hours="$1"
+            [ -n "$hours" ] || die "usage: mihomo subscription hours <hours>"
+            save_subscription_settings "$url" "$hours"
+            print_message "SUCCESS" "subscription interval updated"
+            is_running && start_subscription_updater
+            ;;
+        update)
+            subscription_update_and_reload manual
+            print_message "SUCCESS" "subscription update completed"
+            ;;
+        update-auto)
+            subscription_update_and_reload auto
+            ;;
+        clear|disable)
+            rm -f "$SUBSCRIPTION_SETTINGS_FILE" "$SUBSCRIPTION_LAST_FILE"
+            stop_subscription_updater
+            print_message "SUCCESS" "subscription disabled"
+            ;;
+        *)
+            print_message "INFO" "Usage: mihomo subscription {show|set|hours|update|clear}"
+            exit 1
+            ;;
+    esac
+}
+
 update_mihomo() {
     ensure_dirs
     ensure_alias
@@ -777,6 +1316,12 @@ status_mihomo() {
     [ -n "$version" ] && print_message "INFO" "version: $version"
     cfg="$(config_file 2>/dev/null)"
     [ -n "$cfg" ] && print_message "INFO" "config: $cfg"
+    subscription_url="$(subscription_setting url)"
+    if [ -n "$subscription_url" ]; then
+        print_message "INFO" "subscription: enabled, every $(subscription_update_hours)h"
+    else
+        print_message "INFO" "subscription: disabled"
+    fi
     print_message "INFO" "core log: $LOG_FILE"
     print_message "INFO" "core log limit: $LOG_MAX_BYTES bytes"
 }
@@ -878,14 +1423,59 @@ usage_mihomo() {
     printf '  mihomo status        show core state and architecture\n'
     printf '  mihomo logs          follow Mihomo core log until Ctrl+C\n'
     printf '  mihomo update        update Mihomo core if a new version exists\n'
+    printf '  mihomo subscription  show/set/update subscription config URL\n'
     printf '\n'
     print_message "ACTION" "Routing lists"
     printf '  mihomo setup         interactive include/exclude setup\n'
     printf '  mihomo include show|add|del|set|clear [ip-or-cidr...]\n'
     printf '  mihomo exclude show|add|del|set|clear [ip-or-cidr...]\n'
     printf '\n'
+    print_message "ACTION" "Subscription config"
+    printf '  mihomo subscription show\n'
+    printf '  mihomo subscription set <url> [hours]\n'
+    printf '  mihomo subscription hours <hours>\n'
+    printf '  mihomo subscription update\n'
+    printf '  mihomo subscription clear\n'
+    printf '\n'
     print_message "ACTION" "Maintenance"
     printf '  mihomo uninstall     remove core, files, hooks and iptables rules\n'
+}
+
+subscription_setup_menu() {
+    ensure_dirs
+    while :; do
+        printf '\n%s%s%s\n' "$BOLD" "Mihomo subscription setup" "$RESET"
+        subscription_mihomo show
+        printf '\n'
+        printf '  1) Set URL and update interval\n'
+        printf '  2) Change update interval\n'
+        printf '  3) Update now\n'
+        printf '  4) Disable subscription\n'
+        printf '  0) Back\n'
+        printf '\nSelect option: '
+        read choice
+        case "$choice" in
+            1)
+                printf 'Enter subscription URL: '
+                read url
+                printf 'Update interval in hours [24]: '
+                read hours
+                [ -n "$hours" ] || hours=24
+                subscription_mihomo set "$url" "$hours"
+                pause_enter
+                ;;
+            2)
+                printf 'Update interval in hours: '
+                read hours
+                subscription_mihomo hours "$hours"
+                pause_enter
+                ;;
+            3) subscription_mihomo update; pause_enter ;;
+            4) subscription_mihomo clear; pause_enter ;;
+            0) return 0 ;;
+            *) print_message "WARN" "unknown option" ;;
+        esac
+    done
 }
 
 main_menu() {
@@ -896,9 +1486,10 @@ main_menu() {
         printf '  3) Stop\n'
         printf '  4) Restart\n'
         printf '  5) Update core\n'
-        printf '  6) Routing setup\n'
-        printf '  7) Show core log\n'
-        printf '  8) Show commands\n'
+        printf '  6) Subscription setup\n'
+        printf '  7) Routing setup\n'
+        printf '  8) Show core log\n'
+        printf '  9) Show commands\n'
         printf '  0) Exit\n'
         printf '\nSelect option: '
         read choice
@@ -908,9 +1499,10 @@ main_menu() {
             3) stop_mihomo; pause_enter ;;
             4) stop_mihomo; sleep 2; start_mihomo; pause_enter ;;
             5) update_mihomo; pause_enter ;;
-            6) setup_mihomo ;;
-            7) log_mihomo ;;
-            8) usage_mihomo; pause_enter ;;
+            6) subscription_setup_menu ;;
+            7) setup_mihomo ;;
+            8) log_mihomo ;;
+            9) usage_mihomo; pause_enter ;;
             0) exit 0 ;;
             *) print_message "WARN" "unknown option" ;;
         esac
@@ -936,6 +1528,7 @@ case "$1" in
     status) status_mihomo ;;
     log|logs) log_mihomo ;;
     update) update_mihomo ;;
+    subscription|sub) shift; subscription_mihomo "$@" ;;
     setup) setup_mihomo ;;
     exclude) shift; exclude_mihomo "$@" ;;
     include) shift; include_mihomo "$@" ;;
