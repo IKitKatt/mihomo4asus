@@ -526,6 +526,186 @@ log_http_error() {
     fi
 }
 
+url_host() {
+    url="$1"
+    host="${url#*://}"
+    host="${host%%/*}"
+    host="${host%%:*}"
+    printf '%s\n' "$host"
+}
+
+url_port() {
+    url="$1"
+    scheme="${url%%://*}"
+    rest="${url#*://}"
+    host_port="${rest%%/*}"
+    port="${host_port##*:}"
+
+    if [ "$port" != "$host_port" ]; then
+        printf '%s\n' "$port"
+        return 0
+    fi
+    case "$scheme" in
+        http) printf '%s\n' "80" ;;
+        *) printf '%s\n' "443" ;;
+    esac
+}
+
+log_subscription_network_info() {
+    url="$1"
+    host="$(url_host "$url")"
+    [ -n "$host" ] || return 0
+
+    log "subscription host: $host"
+    if command -v nslookup >/dev/null 2>&1; then
+        ns_line="$(nslookup "$host" 2>/dev/null | awk '/^Address[ 0-9]*: / { value=$NF } END { print value }')"
+        [ -n "$ns_line" ] && log "subscription host resolved to: $ns_line"
+    elif [ -x /bin/busybox ]; then
+        ns_line="$(/bin/busybox nslookup "$host" 2>/dev/null | awk '/^Address[ 0-9]*: / { value=$NF } END { print value }')"
+        [ -n "$ns_line" ] && log "subscription host resolved to: $ns_line"
+    fi
+
+    if command -v ping >/dev/null 2>&1; then
+        ping -c 1 -W 2 "$host" >/dev/null 2>&1 && log "subscription host ping: ok" || log "subscription host ping: failed"
+    fi
+}
+
+validate_resolve_ip() {
+    resolve_ip="$1"
+    case "$resolve_ip" in
+        ""|*[!0-9.]*|.*|*.) return 1 ;;
+    esac
+    return 0
+}
+
+host_resolved_ips() {
+    host="$1"
+    if command -v nslookup >/dev/null 2>&1; then
+        nslookup "$host" 2>/dev/null
+    elif [ -x /bin/busybox ]; then
+        /bin/busybox nslookup "$host" 2>/dev/null
+    else
+        return 1
+    fi | awk '
+        /^Name:/ { in_answer=1; next }
+        /^Non-authoritative answer:/ { in_answer=1; next }
+        in_answer && /^Address[ 0-9]*:/ {
+            ip=$NF
+            if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) print ip
+        }
+        in_answer && /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1 }
+    '
+}
+
+ip_in_list() {
+    needle="$1"
+    while read list_ip; do
+        [ "$needle" = "$list_ip" ] && return 0
+    done
+    return 1
+}
+
+host_resolves_to_wan() {
+    host="$1"
+    resolved_ips="$(host_resolved_ips "$host")"
+    [ -n "$resolved_ips" ] || return 1
+    wan_ips="$(get_wan_ips)"
+    [ -n "$wan_ips" ] || return 1
+
+    printf '%s\n' "$resolved_ips" | while read resolved_ip; do
+        [ -n "$resolved_ip" ] || continue
+        if printf '%s\n' "$wan_ips" | ip_in_list "$resolved_ip"; then
+            printf '%s\n' "$resolved_ip"
+            exit 0
+        fi
+    done
+}
+
+nvram_port_forward_target() {
+    wan_port="$1"
+    command -v nvram >/dev/null 2>&1 || return 1
+    vts_enabled="$(nvram get vts_enable_x 2>/dev/null)"
+    [ "$vts_enabled" = "0" ] && return 1
+    nvram get vts_rulelist 2>/dev/null | awk -v want="$wan_port" '
+        function port_match(spec, want, part, parts, range, bounds, n, i) {
+            if (spec == "" || spec == want) return 1
+            n=split(spec, parts, ",")
+            for (i=1; i<=n; i++) {
+                part=parts[i]
+                if (part == want) return 1
+                if (part ~ /^[0-9]+:[0-9]+$/) {
+                    split(part, bounds, ":")
+                    if (want + 0 >= bounds[1] + 0 && want + 0 <= bounds[2] + 0) return 1
+                }
+            }
+            return 0
+        }
+        BEGIN { RS="<"; FS=">" }
+        NF >= 5 {
+            ext=$2
+            ip=$3
+            int=$4
+            proto=$5
+            if (ip !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) next
+            if (proto != "" && proto !~ /^(TCP|BOTH|Both|both)$/) next
+            if (port_match(ext, want)) {
+                if (int == "") int=want
+                split(int, int_parts, ",")
+                int=int_parts[1]
+                split(int, int_range, ":")
+                int=int_range[1]
+                print ip ":" int
+                exit
+            }
+        }
+    '
+}
+
+iptables_port_forward_target() {
+    wan_port="$1"
+    command -v iptables >/dev/null 2>&1 || return 1
+    iptables -t nat -S 2>/dev/null | awk -v want="$wan_port" '
+        /-j DNAT/ && /--dport/ && /--to-destination/ {
+            dport=""
+            target=""
+            for (i=1; i<=NF; i++) {
+                if ($i == "--dport" && i < NF) dport=$(i+1)
+                if ($i == "--to-destination" && i < NF) target=$(i+1)
+            }
+            if (dport != want) next
+            if (target !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]+)?$/) next
+            if (target !~ /:/) target=target ":" want
+            print target
+            exit
+        }
+    '
+}
+
+port_forward_target() {
+    wan_port="$1"
+    target="$(nvram_port_forward_target "$wan_port")"
+    if [ -n "$target" ]; then
+        printf '%s\n' "$target"
+        return 0
+    fi
+    iptables_port_forward_target "$wan_port"
+}
+
+auto_hairpin_target() {
+    url="$1"
+    host="$(url_host "$url")"
+    port="$(url_port "$url")"
+    [ -n "$host" ] || return 1
+    [ -n "$port" ] || return 1
+
+    wan_match="$(host_resolves_to_wan "$host")"
+    [ -n "$wan_match" ] || return 1
+    target="$(port_forward_target "$port")"
+    [ -n "$target" ] || return 1
+
+    printf '%s\n' "$target"
+}
+
 detect_device_model() {
     model=""
     if command -v nvram >/dev/null 2>&1; then
@@ -623,6 +803,10 @@ http_get_subscription_to_file() {
     url="$1"
     dst="$2"
     err_file="$RUN_DIR/subscription-http.err.$$"
+    host="$(url_host "$url")"
+    port="$(url_port "$url")"
+    resolve_ip="$(subscription_setting resolve_ip)"
+    hairpin_target=""
     headers="$(subscription_headers)"
     hwid="$(printf '%s\n' "$headers" | sed -n '1p')"
     device_os="$(printf '%s\n' "$headers" | sed -n '2p')"
@@ -632,10 +816,85 @@ http_get_subscription_to_file() {
     accept_header="Accept: application/json, text/plain, */*"
 
     rm -f "$dst" "$err_file"
+    log_subscription_network_info "$url"
+    [ -n "$resolve_ip" ] && log "subscription host override: $host:$port -> $resolve_ip"
+    if [ -z "$resolve_ip" ]; then
+        hairpin_target="$(auto_hairpin_target "$url")"
+        [ -n "$hairpin_target" ] && log "subscription automatic hairpin target: $host:$port -> $hairpin_target"
+    fi
 
     curl_bin="$(find_command_path curl 2>/dev/null)"
     if [ -n "$curl_bin" ]; then
-        if "$curl_bin" -fsSL -m 120 \
+        if [ -n "$hairpin_target" ]; then
+            hairpin_ip="${hairpin_target%:*}"
+            hairpin_port="${hairpin_target##*:}"
+            if "$curl_bin" -fsSL --connect-timeout 20 -m 120 \
+                --connect-to "$host:$port:$hairpin_ip:$hairpin_port" \
+                -A "$user_agent" \
+                -H "$accept_header" \
+                -H "x-hwid: $hwid" \
+                -H "x-device-os: $device_os" \
+                -H "x-ver-os: $ver_os" \
+                -H "x-device-model: $device_model" \
+                -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+                rm -f "$err_file"
+                return 0
+            fi
+            log_http_error "curl automatic hairpin request failed" "$err_file"
+            rm -f "$dst" "$err_file"
+
+            if [ "$hairpin_port" = "$port" ]; then
+                if "$curl_bin" -fsSL --connect-timeout 20 -m 120 \
+                    --resolve "$host:$port:$hairpin_ip" \
+                    -A "$user_agent" \
+                    -H "$accept_header" \
+                    -H "x-hwid: $hwid" \
+                    -H "x-device-os: $device_os" \
+                    -H "x-ver-os: $ver_os" \
+                    -H "x-device-model: $device_model" \
+                    -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+                    rm -f "$err_file"
+                    return 0
+                fi
+                log_http_error "curl automatic hairpin resolve request failed" "$err_file"
+                rm -f "$dst" "$err_file"
+            fi
+        fi
+
+        if [ -n "$resolve_ip" ]; then
+            if "$curl_bin" -fsSL --connect-timeout 20 -m 120 \
+                --resolve "$host:$port:$resolve_ip" \
+                -A "$user_agent" \
+                -H "$accept_header" \
+                -H "x-hwid: $hwid" \
+                -H "x-device-os: $device_os" \
+                -H "x-ver-os: $ver_os" \
+                -H "x-device-model: $device_model" \
+                -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+                rm -f "$err_file"
+                return 0
+            fi
+            log_http_error "curl subscription request with host override failed" "$err_file"
+            rm -f "$dst" "$err_file"
+
+            if "$curl_bin" -fsSL -k --connect-timeout 20 -m 120 \
+                --resolve "$host:$port:$resolve_ip" \
+                -A "$user_agent" \
+                -H "$accept_header" \
+                -H "x-hwid: $hwid" \
+                -H "x-device-os: $device_os" \
+                -H "x-ver-os: $ver_os" \
+                -H "x-device-model: $device_model" \
+                -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+                log "subscription request succeeded with host override and insecure TLS verification"
+                rm -f "$err_file"
+                return 0
+            fi
+            log_http_error "curl insecure subscription request with host override failed" "$err_file"
+            rm -f "$dst" "$err_file"
+        fi
+
+        if "$curl_bin" -4 -fsSL --connect-timeout 20 -m 120 \
             -A "$user_agent" \
             -H "$accept_header" \
             -H "x-hwid: $hwid" \
@@ -646,10 +905,40 @@ http_get_subscription_to_file() {
             rm -f "$err_file"
             return 0
         fi
+        log_http_error "curl IPv4 subscription request failed" "$err_file"
+        rm -f "$dst" "$err_file"
+
+        if "$curl_bin" -fsSL --connect-timeout 20 -m 120 \
+            -A "$user_agent" \
+            -H "$accept_header" \
+            -H "x-hwid: $hwid" \
+            -H "x-device-os: $device_os" \
+            -H "x-ver-os: $ver_os" \
+            -H "x-device-model: $device_model" \
+            -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+            log "subscription request succeeded with insecure TLS verification"
+            rm -f "$err_file"
+            return 0
+        fi
         log_http_error "curl subscription request failed" "$err_file"
         rm -f "$dst" "$err_file"
 
-        if "$curl_bin" -fsSL -k -m 120 \
+        if "$curl_bin" -4 -fsSL -k --connect-timeout 20 -m 120 \
+            -A "$user_agent" \
+            -H "$accept_header" \
+            -H "x-hwid: $hwid" \
+            -H "x-device-os: $device_os" \
+            -H "x-ver-os: $ver_os" \
+            -H "x-device-model: $device_model" \
+            -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+            log "subscription request succeeded with IPv4 and insecure TLS verification"
+            rm -f "$err_file"
+            return 0
+        fi
+        log_http_error "curl IPv4 insecure subscription request failed" "$err_file"
+        rm -f "$dst" "$err_file"
+
+        if "$curl_bin" -fsSL -k --connect-timeout 20 -m 120 \
             -A "$user_agent" \
             -H "$accept_header" \
             -H "x-hwid: $hwid" \
@@ -667,7 +956,21 @@ http_get_subscription_to_file() {
 
     wget_bin="$(find_command_path wget 2>/dev/null)"
     if [ -n "$wget_bin" ]; then
-        if "$wget_bin" -q \
+        if "$wget_bin" -4 \
+            --header="$accept_header" \
+            --header="x-hwid: $hwid" \
+            --header="x-device-os: $device_os" \
+            --header="x-ver-os: $ver_os" \
+            --header="x-device-model: $device_model" \
+            --user-agent="$user_agent" \
+            -O "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+            rm -f "$err_file"
+            return 0
+        fi
+        log_http_error "wget IPv4 subscription request failed" "$err_file"
+        rm -f "$dst" "$err_file"
+
+        if "$wget_bin" \
             --header="$accept_header" \
             --header="x-hwid: $hwid" \
             --header="x-device-os: $device_os" \
@@ -681,7 +984,21 @@ http_get_subscription_to_file() {
         log_http_error "wget subscription request failed" "$err_file"
         rm -f "$dst" "$err_file"
 
-        if "$wget_bin" -q \
+        if "$wget_bin" -4 \
+            --header="$accept_header" \
+            --header="x-hwid: $hwid" \
+            --header="x-device-os: $device_os" \
+            --header="x-ver-os: $ver_os" \
+            --header="x-device-model: $device_model" \
+            -U "$user_agent" \
+            -O "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+            rm -f "$err_file"
+            return 0
+        fi
+        log_http_error "wget IPv4 short-option subscription request failed" "$err_file"
+        rm -f "$dst" "$err_file"
+
+        if "$wget_bin" \
             --header="$accept_header" \
             --header="x-hwid: $hwid" \
             --header="x-device-os: $device_os" \
@@ -695,7 +1012,22 @@ http_get_subscription_to_file() {
         log_http_error "wget short-option subscription request failed" "$err_file"
         rm -f "$dst" "$err_file"
 
-        if "$wget_bin" -q --no-check-certificate \
+        if "$wget_bin" -4 --no-check-certificate \
+            --header="$accept_header" \
+            --header="x-hwid: $hwid" \
+            --header="x-device-os: $device_os" \
+            --header="x-ver-os: $ver_os" \
+            --header="x-device-model: $device_model" \
+            -U "$user_agent" \
+            -O "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+            log "subscription request succeeded with IPv4 and wget no-check-certificate"
+            rm -f "$err_file"
+            return 0
+        fi
+        log_http_error "wget IPv4 no-check-certificate subscription request failed" "$err_file"
+        rm -f "$dst" "$err_file"
+
+        if "$wget_bin" --no-check-certificate \
             --header="$accept_header" \
             --header="x-hwid: $hwid" \
             --header="x-device-os: $device_os" \
@@ -711,7 +1043,7 @@ http_get_subscription_to_file() {
         rm -f "$dst" "$err_file"
     fi
 
-    log "no working curl/wget subscription HTTP client found"
+    log "subscription HTTP request failed with available curl/wget clients"
     rm -f "$err_file"
     return 1
 }
@@ -722,6 +1054,7 @@ subscription_setting() {
     case "$name" in
         url) key="URL" ;;
         hours) key="UPDATE_HOURS" ;;
+        resolve_ip) key="RESOLVE_IP" ;;
         *) return 1 ;;
     esac
     grep -m1 "^$key=" "$SUBSCRIPTION_SETTINGS_FILE" 2>/dev/null | sed 's/^[^=]*=//;s/\r$//'
@@ -739,12 +1072,24 @@ subscription_update_hours() {
 save_subscription_settings() {
     url="$1"
     hours="$2"
+    if [ "$#" -ge 3 ]; then
+        resolve_ip="$3"
+    else
+        resolve_ip="$(subscription_setting resolve_ip)"
+    fi
     case "$hours" in
         ''|*[!0-9]*) die "subscription update interval must be a positive number of hours" ;;
     esac
     [ "$hours" -gt 0 ] 2>/dev/null || die "subscription update interval must be greater than zero"
+    if [ -n "$resolve_ip" ] && ! validate_resolve_ip "$resolve_ip"; then
+        die "subscription resolve IP must be an IPv4 address"
+    fi
     mkdir -p "$CONFIG_DIR" || die "cannot create $CONFIG_DIR"
-    printf 'URL=%s\nUPDATE_HOURS=%s\n' "$url" "$hours" > "$SUBSCRIPTION_SETTINGS_FILE" || die "cannot write $SUBSCRIPTION_SETTINGS_FILE"
+    {
+        printf 'URL=%s\n' "$url"
+        printf 'UPDATE_HOURS=%s\n' "$hours"
+        [ -n "$resolve_ip" ] && printf 'RESOLVE_IP=%s\n' "$resolve_ip"
+    } > "$SUBSCRIPTION_SETTINGS_FILE" || die "cannot write $SUBSCRIPTION_SETTINGS_FILE"
 }
 
 subscription_is_due() {
@@ -1336,9 +1681,15 @@ subscription_mihomo() {
         show|"")
             url="$(subscription_setting url)"
             hours="$(subscription_update_hours)"
+            resolve_ip="$(subscription_setting resolve_ip)"
             if [ -n "$url" ]; then
                 print_message "INFO" "subscription URL: $url"
                 print_message "INFO" "update interval: ${hours}h"
+                if [ -n "$resolve_ip" ]; then
+                    print_message "INFO" "host override IP: $resolve_ip"
+                else
+                    print_message "INFO" "host override IP: disabled"
+                fi
                 last="$(cat "$SUBSCRIPTION_LAST_FILE" 2>/dev/null)"
                 case "$last" in
                     ''|*[!0-9]*) print_message "INFO" "last update: never" ;;
@@ -1368,6 +1719,23 @@ subscription_mihomo() {
             print_message "SUCCESS" "subscription interval updated"
             is_running && start_subscription_updater
             ;;
+        resolve)
+            shift
+            url="$(subscription_setting url)"
+            [ -n "$url" ] || die "subscription URL is not configured"
+            hours="$(subscription_update_hours)"
+            resolve_ip="$1"
+            [ -n "$resolve_ip" ] || die "usage: mihomo subscription resolve <internal-ip|clear>"
+            case "$resolve_ip" in
+                clear|disable|off|none) resolve_ip="" ;;
+            esac
+            save_subscription_settings "$url" "$hours" "$resolve_ip"
+            if [ -n "$resolve_ip" ]; then
+                print_message "SUCCESS" "subscription host override set to $resolve_ip"
+            else
+                print_message "SUCCESS" "subscription host override disabled"
+            fi
+            ;;
         update)
             subscription_update_and_reload manual
             print_message "SUCCESS" "subscription update completed"
@@ -1381,7 +1749,7 @@ subscription_mihomo() {
             print_message "SUCCESS" "subscription disabled"
             ;;
         *)
-            print_message "INFO" "Usage: mihomo subscription {show|set|hours|update|clear}"
+            print_message "INFO" "Usage: mihomo subscription {show|set|hours|resolve|update|clear}"
             exit 1
             ;;
     esac
@@ -1545,6 +1913,7 @@ usage_mihomo() {
     printf '  mihomo subscription show\n'
     printf '  mihomo subscription set <url> [hours]\n'
     printf '  mihomo subscription hours <hours>\n'
+    printf '  mihomo subscription resolve <internal-ip|clear>\n'
     printf '  mihomo subscription update\n'
     printf '  mihomo subscription clear\n'
     printf '\n'
@@ -1561,7 +1930,9 @@ subscription_setup_menu() {
         printf '  1) Set URL and update interval\n'
         printf '  2) Change update interval\n'
         printf '  3) Update now\n'
-        printf '  4) Disable subscription\n'
+        printf '  4) Set host override IP\n'
+        printf '  5) Clear host override IP\n'
+        printf '  6) Disable subscription\n'
         printf '  0) Back\n'
         printf '\nSelect option: '
         read choice
@@ -1582,7 +1953,14 @@ subscription_setup_menu() {
                 pause_enter
                 ;;
             3) subscription_mihomo update; pause_enter ;;
-            4) subscription_mihomo clear; pause_enter ;;
+            4)
+                printf 'Enter internal subscription server IP: '
+                read resolve_ip
+                subscription_mihomo resolve "$resolve_ip"
+                pause_enter
+                ;;
+            5) subscription_mihomo resolve clear; pause_enter ;;
+            6) subscription_mihomo clear; pause_enter ;;
             0) return 0 ;;
             *) print_message "WARN" "unknown option" ;;
         esac

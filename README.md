@@ -101,6 +101,20 @@ mihomo subscription show
 mihomo subscription clear
 ```
 
+If the subscription domain points to the same public IP as the router, router-originated requests can fail because ASUSWRT NAT loopback usually does not apply to the router itself. `mihomo4asus` tries to detect this automatically by reading ASUSWRT port forwarding rules from NVRAM and connecting to the internal target while keeping the original URL host for Host/SNI.
+
+If automatic detection is not possible, keep the public HTTPS URL, but force the subscription host to the internal server IP:
+
+```sh
+mihomo subscription resolve 192.168.50.10
+```
+
+Disable this override:
+
+```sh
+mihomo subscription resolve clear
+```
+
 The downloader sends `x-hwid`, `x-device-os`, `x-ver-os`, `x-device-model`, and `user-agent: mihomo4asus/0.0.3`. The HWID is a SHA-256 hash from firmware version, router model, and a stable first-use date.
 
 When a downloaded config is applied, the script preserves local operational settings required for `mihomo4asus`: `tproxy-port`, UI/controller keys, `dns.listen`, and the full `sniffer` section. Other sections from the subscription config replace the local config.
