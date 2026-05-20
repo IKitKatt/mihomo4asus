@@ -555,12 +555,26 @@ hash_hwid_source() {
     source_text="$1"
     if command -v sha256sum >/dev/null 2>&1; then
         printf '%s' "$source_text" | sha256sum | awk '{print $1}'
+    elif [ -x /opt/bin/sha256sum ]; then
+        printf '%s' "$source_text" | /opt/bin/sha256sum | awk '{print $1}'
+    elif command -v busybox >/dev/null 2>&1 && busybox sha256sum /dev/null >/dev/null 2>&1; then
+        printf '%s' "$source_text" | busybox sha256sum | awk '{print $1}'
+    elif [ -x /bin/busybox ] && /bin/busybox sha256sum /dev/null >/dev/null 2>&1; then
+        printf '%s' "$source_text" | /bin/busybox sha256sum | awk '{print $1}'
     elif command -v openssl >/dev/null 2>&1; then
         printf '%s' "$source_text" | openssl dgst -sha256 2>/dev/null | awk '{print $NF}'
+    elif [ -x /opt/bin/openssl ]; then
+        printf '%s' "$source_text" | /opt/bin/openssl dgst -sha256 2>/dev/null | awk '{print $NF}'
     elif command -v md5sum >/dev/null 2>&1; then
         printf '%s' "$source_text" | md5sum | awk '{print $1}'
+    elif [ -x /opt/bin/md5sum ]; then
+        printf '%s' "$source_text" | /opt/bin/md5sum | awk '{print $1}'
+    elif command -v busybox >/dev/null 2>&1 && busybox md5sum /dev/null >/dev/null 2>&1; then
+        printf '%s' "$source_text" | busybox md5sum | awk '{print $1}'
+    elif [ -x /bin/busybox ] && /bin/busybox md5sum /dev/null >/dev/null 2>&1; then
+        printf '%s' "$source_text" | /bin/busybox md5sum | awk '{print $1}'
     else
-        printf '%s' "$source_text" | cksum | awk '{print $1 $2}'
+        printf '%s' "$source_text" | sed 's/[^A-Za-z0-9]//g;s/^\(.\{1,64\}\).*/\1/'
     fi
 }
 
@@ -570,6 +584,7 @@ subscription_headers() {
     device_model="$(detect_device_model)"
     date_value="$(hwid_date)"
     hwid="$(hash_hwid_source "$ver_os$device_model$date_value")"
+    [ -n "$hwid" ] || hwid="mihomo4asus"
     user_agent="mihomo4asus/$SCRIPT_VERSION"
 
     printf '%s\n' "$hwid"
@@ -579,7 +594,7 @@ subscription_headers() {
     printf '%s\n' "$user_agent"
 }
 
-download_subscription_to_file() {
+http_get_subscription_to_file() {
     url="$1"
     dst="$2"
     headers="$(subscription_headers)"
@@ -594,7 +609,7 @@ download_subscription_to_file() {
         --header="x-device-os: $device_os" \
         --header="x-ver-os: $ver_os" \
         --header="x-device-model: $device_model" \
-        --header="user-agent: $user_agent" \
+        --user-agent="$user_agent" \
         -O "$dst" "$url" 2>/dev/null || \
         curl -fsSL \
             -H "x-hwid: $hwid" \
@@ -740,8 +755,8 @@ subscription_update_config() {
     tmp_merged="$RUN_DIR/subscription.merged.$$"
 
     rm -f "$tmp_raw" "$tmp_merged"
-    log "downloading subscription config"
-    if ! download_subscription_to_file "$subscription_url" "$tmp_raw"; then
+    log "requesting subscription config"
+    if ! http_get_subscription_to_file "$subscription_url" "$tmp_raw"; then
         rm -f "$tmp_raw" "$tmp_merged"
         log "ERROR: subscription download failed"
         return 3
