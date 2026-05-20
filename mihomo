@@ -502,6 +502,30 @@ download_to_file() {
         curl -fsSL -o "$dst" "$url" 2>/dev/null
 }
 
+find_command_path() {
+    cmd="$1"
+    found="$(command -v "$cmd" 2>/dev/null)"
+    if [ -n "$found" ]; then
+        printf '%s\n' "$found"
+        return 0
+    fi
+    for path in "/opt/bin/$cmd" "/usr/bin/$cmd" "/bin/$cmd" "/usr/sbin/$cmd" "/sbin/$cmd"; do
+        [ -x "$path" ] && { printf '%s\n' "$path"; return 0; }
+    done
+    return 1
+}
+
+log_http_error() {
+    label="$1"
+    err_file="$2"
+    if [ -s "$err_file" ]; then
+        err_line="$(sed -n '/./{p;q;}' "$err_file" 2>/dev/null)"
+        [ -n "$err_line" ] && log "$label: $err_line"
+    else
+        log "$label"
+    fi
+}
+
 detect_device_model() {
     model=""
     if command -v nvram >/dev/null 2>&1; then
@@ -584,6 +608,7 @@ subscription_headers() {
     device_model="$(detect_device_model)"
     date_value="$(hwid_date)"
     hwid="$(hash_hwid_source "$ver_os$device_model$date_value")"
+    hwid="$(printf '%s' "$hwid" | sed 's/[^A-Za-z0-9._-]//g;s/^\(.\{1,32\}\).*/\1/')"
     [ -n "$hwid" ] || hwid="mihomo4asus"
     user_agent="mihomo4asus/$SCRIPT_VERSION"
 
@@ -597,27 +622,98 @@ subscription_headers() {
 http_get_subscription_to_file() {
     url="$1"
     dst="$2"
+    err_file="$RUN_DIR/subscription-http.err.$$"
     headers="$(subscription_headers)"
     hwid="$(printf '%s\n' "$headers" | sed -n '1p')"
     device_os="$(printf '%s\n' "$headers" | sed -n '2p')"
     ver_os="$(printf '%s\n' "$headers" | sed -n '3p')"
     device_model="$(printf '%s\n' "$headers" | sed -n '4p')"
     user_agent="$(printf '%s\n' "$headers" | sed -n '5p')"
+    accept_header="Accept: application/json, text/plain, */*"
 
-    wget -q \
-        --header="x-hwid: $hwid" \
-        --header="x-device-os: $device_os" \
-        --header="x-ver-os: $ver_os" \
-        --header="x-device-model: $device_model" \
-        --user-agent="$user_agent" \
-        -O "$dst" "$url" 2>/dev/null || \
-        curl -fsSL \
+    rm -f "$dst" "$err_file"
+
+    curl_bin="$(find_command_path curl 2>/dev/null)"
+    if [ -n "$curl_bin" ]; then
+        if "$curl_bin" -fsSL -m 120 \
+            -A "$user_agent" \
+            -H "$accept_header" \
             -H "x-hwid: $hwid" \
             -H "x-device-os: $device_os" \
             -H "x-ver-os: $ver_os" \
             -H "x-device-model: $device_model" \
+            -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+            rm -f "$err_file"
+            return 0
+        fi
+        log_http_error "curl subscription request failed" "$err_file"
+        rm -f "$dst" "$err_file"
+
+        if "$curl_bin" -fsSL -k -m 120 \
             -A "$user_agent" \
-            -o "$dst" "$url" 2>/dev/null
+            -H "$accept_header" \
+            -H "x-hwid: $hwid" \
+            -H "x-device-os: $device_os" \
+            -H "x-ver-os: $ver_os" \
+            -H "x-device-model: $device_model" \
+            -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+            log "subscription request succeeded with insecure TLS verification"
+            rm -f "$err_file"
+            return 0
+        fi
+        log_http_error "curl insecure subscription request failed" "$err_file"
+        rm -f "$dst" "$err_file"
+    fi
+
+    wget_bin="$(find_command_path wget 2>/dev/null)"
+    if [ -n "$wget_bin" ]; then
+        if "$wget_bin" -q \
+            --header="$accept_header" \
+            --header="x-hwid: $hwid" \
+            --header="x-device-os: $device_os" \
+            --header="x-ver-os: $ver_os" \
+            --header="x-device-model: $device_model" \
+            --user-agent="$user_agent" \
+            -O "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+            rm -f "$err_file"
+            return 0
+        fi
+        log_http_error "wget subscription request failed" "$err_file"
+        rm -f "$dst" "$err_file"
+
+        if "$wget_bin" -q \
+            --header="$accept_header" \
+            --header="x-hwid: $hwid" \
+            --header="x-device-os: $device_os" \
+            --header="x-ver-os: $ver_os" \
+            --header="x-device-model: $device_model" \
+            -U "$user_agent" \
+            -O "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+            rm -f "$err_file"
+            return 0
+        fi
+        log_http_error "wget short-option subscription request failed" "$err_file"
+        rm -f "$dst" "$err_file"
+
+        if "$wget_bin" -q --no-check-certificate \
+            --header="$accept_header" \
+            --header="x-hwid: $hwid" \
+            --header="x-device-os: $device_os" \
+            --header="x-ver-os: $ver_os" \
+            --header="x-device-model: $device_model" \
+            -U "$user_agent" \
+            -O "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+            log "subscription request succeeded with wget no-check-certificate"
+            rm -f "$err_file"
+            return 0
+        fi
+        log_http_error "wget no-check-certificate subscription request failed" "$err_file"
+        rm -f "$dst" "$err_file"
+    fi
+
+    log "no working curl/wget subscription HTTP client found"
+    rm -f "$err_file"
+    return 1
 }
 
 subscription_setting() {
@@ -628,7 +724,7 @@ subscription_setting() {
         hours) key="UPDATE_HOURS" ;;
         *) return 1 ;;
     esac
-    grep -m1 "^$key=" "$SUBSCRIPTION_SETTINGS_FILE" 2>/dev/null | sed 's/^[^=]*=//'
+    grep -m1 "^$key=" "$SUBSCRIPTION_SETTINGS_FILE" 2>/dev/null | sed 's/^[^=]*=//;s/\r$//'
 }
 
 subscription_update_hours() {
