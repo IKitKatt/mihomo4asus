@@ -18,7 +18,9 @@ SCRIPT_BRANCH="${SCRIPT_BRANCH:-main}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/$SCRIPT_REPO/$SCRIPT_BRANCH/mihomo}"
 CONFIG_DIR="${CONFIG_DIR:-$MIHOMO_HOME/config}"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
+SUB_CONFIG_FILE="${SUB_CONFIG_FILE:-$CONFIG_DIR/sub-config.yaml}"
 RUN_DIR="${RUN_DIR:-$MIHOMO_HOME/run}"
+STATE_DIR="${STATE_DIR:-$MIHOMO_HOME/state}"
 LOG_FILE="${LOG_FILE:-$MIHOMO_HOME/mihomo.log}"
 LOG_MAX_BYTES="${LOG_MAX_BYTES:-3145728}"
 DOWNLOAD_DIR="${DOWNLOAD_DIR:-$MIHOMO_HOME/download}"
@@ -35,10 +37,10 @@ ROUTE_TABLE="${ROUTE_TABLE:-5554}"
 FW_MARK="${FW_MARK:-0x4d3c2b1b}"
 RULE_PRIORITY="${RULE_PRIORITY:-5354}"
 DNS_PORT="${DNS_PORT:-1053}"
-ROUTING_FILE="${ROUTING_FILE:-$CONFIG_DIR/routing.list}"
-ROUTING_MODE_FILE="${ROUTING_MODE_FILE:-$CONFIG_DIR/routing.mode}"
-EXCLUDE_FILE="${EXCLUDE_FILE:-$CONFIG_DIR/exclude.list}"
-INCLUDE_FILE="${INCLUDE_FILE:-$CONFIG_DIR/include.list}"
+ROUTING_FILE="${ROUTING_FILE:-$STATE_DIR/routing.list}"
+ROUTING_MODE_FILE="${ROUTING_MODE_FILE:-$STATE_DIR/routing.mode}"
+EXCLUDE_FILE="${EXCLUDE_FILE:-$STATE_DIR/exclude.list}"
+INCLUDE_FILE="${INCLUDE_FILE:-$STATE_DIR/include.list}"
 
 TAG="mihomo-script"
 MANGLE_CHAIN="MIHOMO-MANGLE"
@@ -46,9 +48,9 @@ NAT_CHAIN="MIHOMO-NAT"
 PID_FILE="$RUN_DIR/mihomo.pid"
 LOG_GUARD_PID_FILE="$RUN_DIR/mihomo-log-guard.pid"
 SUBSCRIPTION_PID_FILE="$RUN_DIR/mihomo-subscription.pid"
-SUBSCRIPTION_SETTINGS_FILE="$CONFIG_DIR/subscription.conf"
-SUBSCRIPTION_LAST_FILE="$CONFIG_DIR/subscription.last"
-SUBSCRIPTION_HWID_DATE_FILE="$CONFIG_DIR/hwid.date"
+SUBSCRIPTION_SETTINGS_FILE="$STATE_DIR/subscription.conf"
+SUBSCRIPTION_LAST_FILE="$STATE_DIR/subscription.last"
+SUBSCRIPTION_HWID_DATE_FILE="$STATE_DIR/hwid.date"
 SUBSCRIPTION_PROFILE_INTERVAL_FILE="$RUN_DIR/subscription.profile-update-interval"
 MODE_FILE="$RUN_DIR/mode"
 
@@ -183,14 +185,38 @@ stop_subscription_updater() {
 
 ensure_dirs() {
     [ -d "$ROOT_DIR" ] || die "Entware root $ROOT_DIR is not available"
-    mkdir -p "$MIHOMO_HOME" "$CONFIG_DIR" "$RUN_DIR" || die "cannot create mihomo directories"
+    mkdir -p "$MIHOMO_HOME" "$CONFIG_DIR" "$RUN_DIR" "$STATE_DIR" || die "cannot create mihomo directories"
+    migrate_config_extras
 }
 
 ensure_script_dirs() {
     mkdir -p "$(dirname "$SCRIPT_PATH")" /jffs/scripts /jffs/configs || die "cannot create JFFS script directories"
 }
 
+migrate_config_extras() {
+    [ -d "$CONFIG_DIR" ] || return 0
+    [ -d "$STATE_DIR" ] || return 0
+    for config_path in "$CONFIG_DIR"/*; do
+        [ -e "$config_path" ] || continue
+        config_name="${config_path##*/}"
+        case "$config_name" in
+            config.yaml|sub-config.yaml) continue ;;
+        esac
+        [ -f "$config_path" ] || continue
+        if [ -e "$STATE_DIR/$config_name" ]; then
+            mv "$config_path" "$STATE_DIR/$config_name.migrated.$$" 2>/dev/null || true
+        else
+            mv "$config_path" "$STATE_DIR/$config_name" 2>/dev/null || true
+        fi
+    done
+}
+
 config_file() {
+    if [ "$(subscription_type)" = "url" ]; then
+        [ -f "$SUB_CONFIG_FILE" ] || return 1
+        echo "$SUB_CONFIG_FILE"
+        return 0
+    fi
     [ -f "$CONFIG_FILE" ] || return 1
     echo "$CONFIG_FILE"
 }
@@ -1212,10 +1238,10 @@ save_subscription_settings() {
         ''|*[!0-9]*) die "subscription update interval must be a positive number of hours" ;;
     esac
     [ "$hours" -gt 0 ] 2>/dev/null || die "subscription update interval must be greater than zero"
-    mkdir -p "$CONFIG_DIR" "$RUN_DIR" 2>/dev/null || die "cannot create subscription settings directories"
-    chmod u+rwx "$CONFIG_DIR" "$RUN_DIR" 2>/dev/null
+    mkdir -p "$STATE_DIR" "$RUN_DIR" 2>/dev/null || die "cannot create subscription settings directories"
+    chmod u+rwx "$STATE_DIR" "$RUN_DIR" 2>/dev/null
 
-    for settings_dir in "$CONFIG_DIR" "$RUN_DIR" /tmp; do
+    for settings_dir in "$STATE_DIR" "$RUN_DIR" /tmp; do
         [ -d "$settings_dir" ] || continue
         tmp_settings="$settings_dir/subscription.conf.$$"
         if write_subscription_settings_file "$tmp_settings" "$type" "$url" "$hours" 2>/dev/null; then
@@ -1399,15 +1425,15 @@ subscription_update_config() {
         return 3
     }
 
-    if [ -f "$CONFIG_FILE" ] && cmp -s "$CONFIG_FILE" "$tmp_merged" 2>/dev/null; then
+    if [ -f "$SUB_CONFIG_FILE" ] && cmp -s "$SUB_CONFIG_FILE" "$tmp_merged" 2>/dev/null; then
         rm -f "$tmp_raw" "$tmp_merged"
         touch_subscription_last
         log "subscription config unchanged"
         return 1
     fi
 
-    [ -f "$CONFIG_FILE" ] && cp "$CONFIG_FILE" "$CONFIG_FILE.bak" 2>/dev/null
-    mv "$tmp_merged" "$CONFIG_FILE" || {
+    [ -f "$SUB_CONFIG_FILE" ] && cp "$SUB_CONFIG_FILE" "$SUB_CONFIG_FILE.bak" 2>/dev/null
+    mv "$tmp_merged" "$SUB_CONFIG_FILE" || {
         rm -f "$tmp_raw" "$tmp_merged"
         log "ERROR: cannot install subscription config"
         return 3
@@ -1421,7 +1447,7 @@ subscription_update_config() {
 subscription_update_if_needed() {
     [ "$(subscription_type)" = "url" ] || return 0
     [ -n "$(subscription_setting url)" ] || return 0
-    [ -f "$CONFIG_FILE" ] || { subscription_update_config; return 0; }
+    [ -f "$SUB_CONFIG_FILE" ] || { subscription_update_config; return 0; }
     subscription_is_due || return 0
     subscription_update_config || log "subscription update skipped; keeping current config"
     return 0
@@ -1607,7 +1633,7 @@ set_routing_mode() {
 
 migrate_routing_list() {
     [ -f "$ROUTING_FILE" ] && return 0
-    mkdir -p "$CONFIG_DIR" 2>/dev/null || return 1
+    mkdir -p "$STATE_DIR" 2>/dev/null || return 1
     if [ -n "$(list_items "$INCLUDE_FILE")" ]; then
         list_items "$INCLUDE_FILE" > "$ROUTING_FILE"
         set_routing_mode include
@@ -1736,7 +1762,7 @@ apply_dns_redirect() {
 }
 
 apply_rules() {
-    cfg="$(config_file)" || die "missing $CONFIG_FILE"
+    cfg="$(config_file)" || die "missing active config"
     tproxy_port="$(detect_tproxy_port "$cfg")" || die "config $cfg must contain numeric tproxy-port, for example: tproxy-port: 7894"
     dns_port="$(detect_dns_port "$cfg")"
     migrate_routing_list
@@ -1784,7 +1810,7 @@ start_mihomo() {
     clear_core_log
     : > "$LOG_FILE" 2>/dev/null || die "cannot create $LOG_FILE"
     subscription_update_if_needed
-    cfg="$(config_file)" || die "missing $CONFIG_FILE"
+    cfg="$(config_file)" || die "missing active config"
     [ -x "$MIHOMO_BIN" ] || die "missing executable $MIHOMO_BIN"
 
     detect_tproxy_port "$cfg" >/dev/null || die "config $cfg must contain numeric tproxy-port, for example: tproxy-port: 7894"
@@ -1840,7 +1866,7 @@ install_mihomo() {
     install_script
     install_core
     log "mihomo installed"
-    log "put config to $CONFIG_FILE before start"
+    log "put local config to $CONFIG_FILE before start"
 }
 
 exclude_mihomo() {
@@ -1946,10 +1972,11 @@ subscription_mihomo() {
         show|"")
             url="$(subscription_setting url)"
             hours="$(subscription_update_hours)"
-            type="$(subscription_type)"
-            print_message "INFO" "config type: $type"
-            if [ "$type" = "url" ] && [ -n "$url" ]; then
+            sub_type="$(subscription_type)"
+            print_message "INFO" "config type: $sub_type"
+            if [ "$sub_type" = "url" ] && [ -n "$url" ]; then
                 print_message "INFO" "subscription URL: $url"
+                print_message "INFO" "subscription config: $SUB_CONFIG_FILE"
                 print_message "INFO" "update interval: ${hours}h"
                 last="$(cat "$SUBSCRIPTION_LAST_FILE" 2>/dev/null)"
                 case "$last" in
@@ -2081,7 +2108,9 @@ status_mihomo() {
     version="$(current_version)"
     [ -n "$version" ] && print_message "INFO" "version: $version"
     cfg="$(config_file 2>/dev/null)"
-    [ -n "$cfg" ] && print_message "INFO" "config: $cfg"
+    [ -n "$cfg" ] && print_message "INFO" "active config: $cfg"
+    print_message "INFO" "local config: $CONFIG_FILE"
+    print_message "INFO" "subscription config: $SUB_CONFIG_FILE"
     subscription_url="$(subscription_setting url)"
     if [ "$(subscription_type)" = "url" ] && [ -n "$subscription_url" ]; then
         print_message "INFO" "subscription: enabled, every $(subscription_update_hours)h"
@@ -2336,7 +2365,7 @@ subscription_setup_menu() {
         printf '\n%s%s%s\n' "$BOLD" "Mihomo subscription setup" "$RESET"
         subscription_mihomo show
         printf '\n'
-        printf '  1) Switch sub method\n'
+        printf '  1) Switch subscription method\n'
         printf '  2) Set subscription URL\n'
         printf '  3) Change update interval\n'
         printf '  4) Update now\n'
