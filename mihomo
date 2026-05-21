@@ -49,6 +49,7 @@ SUBSCRIPTION_PID_FILE="$RUN_DIR/mihomo-subscription.pid"
 SUBSCRIPTION_SETTINGS_FILE="$CONFIG_DIR/subscription.conf"
 SUBSCRIPTION_LAST_FILE="$CONFIG_DIR/subscription.last"
 SUBSCRIPTION_HWID_DATE_FILE="$CONFIG_DIR/hwid.date"
+SUBSCRIPTION_PROFILE_INTERVAL_FILE="$RUN_DIR/subscription.profile-update-interval"
 MODE_FILE="$RUN_DIR/mode"
 
 if [ -t 1 ]; then
@@ -1041,10 +1042,41 @@ subscription_headers() {
     printf '%s\n' "$user_agent"
 }
 
+subscription_profile_update_interval() {
+    headers_file="$1"
+    [ -s "$headers_file" ] || return 1
+    awk -F: '
+        BEGIN { value="" }
+        tolower($1) == "profile-update-interval" {
+            line=$0
+            sub(/^[^:]*:[[:space:]]*/, "", line)
+            sub(/\r$/, "", line)
+            sub(/[[:space:]].*$/, "", line)
+            if (line ~ /^[0-9]+$/ && line > 0) value=line
+        }
+        END {
+            if (value != "") {
+                print value
+                exit 0
+            }
+            exit 1
+        }
+    ' "$headers_file"
+}
+
+capture_subscription_profile_interval() {
+    headers_file="$1"
+    interval="$(subscription_profile_update_interval "$headers_file" 2>/dev/null)"
+    if [ -n "$interval" ]; then
+        printf '%s\n' "$interval" > "$SUBSCRIPTION_PROFILE_INTERVAL_FILE" 2>/dev/null
+    fi
+}
+
 http_get_subscription_to_file() {
     url="$1"
     dst="$2"
     err_file="$RUN_DIR/subscription-http.err.$$"
+    hdr_file="$RUN_DIR/subscription-http.headers.$$"
     host="$(url_host "$url")"
     port="$(url_port "$url")"
     headers="$(subscription_headers)"
@@ -1055,7 +1087,7 @@ http_get_subscription_to_file() {
     user_agent="$(printf '%s\n' "$headers" | sed -n '5p')"
     accept_header="Accept: application/json, text/plain, */*"
 
-    rm -f "$dst" "$err_file"
+    rm -f "$dst" "$err_file" "$hdr_file" "$SUBSCRIPTION_PROFILE_INTERVAL_FILE"
     log_subscription_network_info "$url"
 
     curl_bin="$(find_command_path curl 2>/dev/null)"
@@ -1065,6 +1097,7 @@ http_get_subscription_to_file() {
     }
 
     if "$curl_bin" -4 -fsSL --connect-timeout 10 -m 60 \
+        -D "$hdr_file" \
         -A "$user_agent" \
         -H "$accept_header" \
         -H "x-hwid: $hwid" \
@@ -1072,11 +1105,12 @@ http_get_subscription_to_file() {
         -H "x-ver-os: $ver_os" \
         -H "x-device-model: $device_model" \
         -o "$dst" "$url" 2>"$err_file" && subscription_response_valid "$dst"; then
-        rm -f "$err_file"
+        capture_subscription_profile_interval "$hdr_file"
+        rm -f "$err_file" "$hdr_file"
         return 0
     fi
     log_http_error "curl direct subscription request failed" "$err_file"
-    rm -f "$dst" "$err_file"
+    rm -f "$dst" "$err_file" "$hdr_file"
 
     scan_targets="$(subnet_scan_targets "$port")"
     if [ -n "$scan_targets" ]; then
@@ -1087,6 +1121,7 @@ http_get_subscription_to_file() {
             scan_ip="${scan_target%:*}"
             scan_port="${scan_target##*:}"
             if "$curl_bin" -4 -fsSL --connect-timeout 1 -m 8 \
+                -D "$hdr_file" \
                 --connect-to "$host:$port:$scan_ip:$scan_port" \
                 -A "$user_agent" \
                 -H "$accept_header" \
@@ -1096,17 +1131,18 @@ http_get_subscription_to_file() {
                 -H "x-device-model: $device_model" \
                 -o "$dst" "$url" 2>"$err_file" && subscription_response_valid "$dst"; then
                 log "subscription found on local address: $scan_target"
-                rm -f "$err_file"
+                capture_subscription_profile_interval "$hdr_file"
+                rm -f "$err_file" "$hdr_file"
                 return 0
             fi
-            rm -f "$dst" "$err_file"
+            rm -f "$dst" "$err_file" "$hdr_file"
         done <<EOF
 $scan_targets
 EOF
     fi
 
     log "Не удалось получить подписку по адресу: $url"
-    rm -f "$err_file"
+    rm -f "$err_file" "$hdr_file"
     return 1
 }
 
@@ -1140,9 +1176,9 @@ subscription_type() {
 subscription_update_hours() {
     hours="$(subscription_setting hours)"
     case "$hours" in
-        ''|*[!0-9]*) hours=24 ;;
+        ''|*[!0-9]*) hours=1 ;;
     esac
-    [ "$hours" -gt 0 ] 2>/dev/null || hours=24
+    [ "$hours" -gt 0 ] 2>/dev/null || hours=1
     printf '%s\n' "$hours"
 }
 
@@ -1203,6 +1239,20 @@ save_subscription_settings() {
         die "cannot write $SUBSCRIPTION_SETTINGS_FILE"
     fi
     chmod 600 "$SUBSCRIPTION_SETTINGS_FILE" 2>/dev/null
+}
+
+apply_subscription_profile_interval() {
+    [ -s "$SUBSCRIPTION_PROFILE_INTERVAL_FILE" ] || return 0
+    interval="$(cat "$SUBSCRIPTION_PROFILE_INTERVAL_FILE" 2>/dev/null | sed 's/\r$//')"
+    case "$interval" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    [ "$interval" -gt 0 ] 2>/dev/null || return 0
+    current_interval="$(subscription_update_hours)"
+    if [ "$interval" != "$current_interval" ]; then
+        save_subscription_settings url "$(subscription_setting url)" "$interval"
+        log "subscription update interval set from profile-update-interval: ${interval}h"
+    fi
 }
 
 subscription_is_due() {
@@ -1328,6 +1378,7 @@ subscription_update_config() {
         log "ERROR: subscription download failed"
         return 3
     fi
+    apply_subscription_profile_interval
     [ -s "$tmp_raw" ] || {
         rm -f "$tmp_raw" "$tmp_merged"
         log "ERROR: subscription response is empty"
@@ -1400,6 +1451,7 @@ subscription_update_and_reload() {
             if is_running; then
                 log "subscription config unchanged; reapplying rules"
                 apply_rules
+                start_subscription_updater
             fi
             return 0
             ;;
@@ -1918,8 +1970,8 @@ subscription_mihomo() {
         set|url)
             shift
             url="$1"
-            hours="${2:-24}"
-            [ -n "$url" ] || die "usage: mihomo subscription set <url> [hours]"
+            hours="${2:-$(subscription_update_hours)}"
+            [ -n "$url" ] || die "usage: mihomo subscription set <url>"
             save_subscription_settings url "$url" "$hours"
             print_message "SUCCESS" "subscription settings saved"
             printf '%s\n' "subscription settings saved" | logger -t mihomo
@@ -2120,22 +2172,36 @@ setup_mihomo() {
         print_message "INFO" "mode: $route_mode"
         show_list "Routing list" "$ROUTING_FILE"
         printf '\n'
-        printf '  1) Switch to include mode\n'
-        printf '  2) Switch to exclude mode\n'
-        printf '  3) Disable selective routing\n'
-        printf '  4) Edit routing list\n'
-        printf '  5) Show routed clients\n'
-        printf '  6) Restart routing rules\n'
+        printf '  1) Switch routing method\n'
+        printf '  2) Disable selective routing\n'
+        printf '  3) Edit routing list\n'
+        printf '  4) Restart routing rules\n'
         printf '  0) Back\n'
         printf '\nSelect option: '
         read choice
         case "$choice" in
-            1) set_routing_mode include; print_message "SUCCESS" "routing mode set to include"; is_running && apply_rules; pause_enter ;;
-            2) set_routing_mode exclude; print_message "SUCCESS" "routing mode set to exclude"; is_running && apply_rules; pause_enter ;;
-            3) set_routing_mode off; print_message "SUCCESS" "selective routing disabled"; is_running && apply_rules; pause_enter ;;
-            4) setup_list_menu "routing" "$ROUTING_FILE" ;;
-            5) show_routed_clients; pause_enter ;;
-            6) apply_rules; pause_enter ;;
+            1) routing_method_menu ;;
+            2) set_routing_mode off; print_message "SUCCESS" "selective routing disabled"; is_running && apply_rules; pause_enter ;;
+            3) setup_list_menu "routing" "$ROUTING_FILE" ;;
+            4) apply_rules; pause_enter ;;
+            0) return 0 ;;
+            *) print_message "WARN" "unknown option" ;;
+        esac
+    done
+}
+
+routing_method_menu() {
+    while :; do
+        printf '\n%s%s%s\n' "$BOLD" "Switch routing method" "$RESET"
+        print_message "INFO" "current mode: $(routing_mode)"
+        printf '  1) Include\n'
+        printf '  2) Exclude\n'
+        printf '  0) Back\n'
+        printf '\nSelect option: '
+        read choice
+        case "$choice" in
+            1) set_routing_mode include; print_message "SUCCESS" "routing mode set to include"; is_running && apply_rules; pause_enter; return 0 ;;
+            2) set_routing_mode exclude; print_message "SUCCESS" "routing mode set to exclude"; is_running && apply_rules; pause_enter; return 0 ;;
             0) return 0 ;;
             *) print_message "WARN" "unknown option" ;;
         esac
@@ -2237,7 +2303,7 @@ usage_mihomo() {
     print_message "ACTION" "Subscription config"
     printf '  mihomo subscription show\n'
     printf '  mihomo subscription local\n'
-    printf '  mihomo subscription set <url> [hours]\n'
+    printf '  mihomo subscription set <url>\n'
     printf '  mihomo subscription hours <hours>\n'
     printf '  mihomo subscription update\n'
     printf '  mihomo subscription clear\n'
@@ -2270,41 +2336,54 @@ subscription_setup_menu() {
         printf '\n%s%s%s\n' "$BOLD" "Mihomo subscription setup" "$RESET"
         subscription_mihomo show
         printf '\n'
-        printf '  1) Use local router config\n'
-        printf '  2) Use subscription URL\n'
-        printf '  3) Set subscription URL\n'
-        printf '  4) Change update interval\n'
-        printf '  5) Update now\n'
-        printf '  6) Disable subscription URL\n'
+        printf '  1) Switch sub method\n'
+        printf '  2) Set subscription URL\n'
+        printf '  3) Change update interval\n'
+        printf '  4) Update now\n'
+        printf '  5) Disable subscription URL\n'
         printf '  0) Back\n'
         printf '\nSelect option: '
         read choice
         case "$choice" in
-            1) subscription_mihomo local; pause_enter ;;
+            1) subscription_method_menu ;;
             2)
                 printf 'Enter subscription URL: '
                 read url
-                printf 'Update interval in hours [24]: '
-                read hours
-                [ -n "$hours" ] || hours=24
-                subscription_mihomo set "$url" "$hours"
+                subscription_mihomo set "$url"
                 pause_enter
                 ;;
             3)
-                printf 'Enter subscription URL: '
-                read url
-                hours="$(subscription_update_hours)"
-                subscription_mihomo set "$url" "$hours"
-                pause_enter
-                ;;
-            4)
                 printf 'Update interval in hours: '
                 read hours
                 subscription_mihomo hours "$hours"
                 pause_enter
                 ;;
-            5) subscription_mihomo update; pause_enter ;;
-            6) subscription_mihomo clear; pause_enter ;;
+            4) subscription_mihomo update; pause_enter ;;
+            5) subscription_mihomo clear; pause_enter ;;
+            0) return 0 ;;
+            *) print_message "WARN" "unknown option" ;;
+        esac
+    done
+}
+
+subscription_method_menu() {
+    while :; do
+        printf '\n%s%s%s\n' "$BOLD" "Switch sub method" "$RESET"
+        print_message "INFO" "current method: $(subscription_type)"
+        printf '  1) Local\n'
+        printf '  2) Subscription URL\n'
+        printf '  0) Back\n'
+        printf '\nSelect option: '
+        read choice
+        case "$choice" in
+            1) subscription_mihomo local; pause_enter; return 0 ;;
+            2)
+                printf 'Enter subscription URL: '
+                read url
+                subscription_mihomo set "$url"
+                pause_enter
+                return 0
+                ;;
             0) return 0 ;;
             *) print_message "WARN" "unknown option" ;;
         esac
