@@ -13,6 +13,9 @@ ROOT_DIR="${ROOT_DIR:-/opt/root}"
 MIHOMO_BIN="${MIHOMO_BIN:-$MIHOMO_HOME/mihomo}"
 MIHOMO_REPO="${MIHOMO_REPO:-MetaCubeX/mihomo}"
 MIHOMO_API="${MIHOMO_API:-https://api.github.com/repos/$MIHOMO_REPO/releases/latest}"
+SCRIPT_REPO="${SCRIPT_REPO:-IKitKatt/mihomo4asus}"
+SCRIPT_BRANCH="${SCRIPT_BRANCH:-main}"
+SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/$SCRIPT_REPO/$SCRIPT_BRANCH/mihomo}"
 CONFIG_DIR="${CONFIG_DIR:-$MIHOMO_HOME/config}"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
 RUN_DIR="${RUN_DIR:-$MIHOMO_HOME/run}"
@@ -32,6 +35,8 @@ ROUTE_TABLE="${ROUTE_TABLE:-5554}"
 FW_MARK="${FW_MARK:-0x4d3c2b1b}"
 RULE_PRIORITY="${RULE_PRIORITY:-5354}"
 DNS_PORT="${DNS_PORT:-1053}"
+ROUTING_FILE="${ROUTING_FILE:-$CONFIG_DIR/routing.list}"
+ROUTING_MODE_FILE="${ROUTING_MODE_FILE:-$CONFIG_DIR/routing.mode}"
 EXCLUDE_FILE="${EXCLUDE_FILE:-$CONFIG_DIR/exclude.list}"
 INCLUDE_FILE="${INCLUDE_FILE:-$CONFIG_DIR/include.list}"
 
@@ -150,6 +155,7 @@ stop_log_guard() {
 
 start_subscription_updater() {
     stop_subscription_updater
+    [ "$(subscription_type)" = "url" ] || return 0
     subscription_url="$(subscription_setting url)"
     [ -n "$subscription_url" ] || return 0
     subscription_hours="$(subscription_update_hours)"
@@ -181,6 +187,13 @@ ensure_dirs() {
 
 ensure_script_dirs() {
     mkdir -p "$(dirname "$SCRIPT_PATH")" /jffs/scripts /jffs/configs || die "cannot create JFFS script directories"
+    if command -v nvram >/dev/null 2>&1; then
+        current="$(nvram get jffs2_scripts 2>/dev/null)"
+        if [ "$current" != "1" ]; then
+            nvram set jffs2_scripts=1 2>/dev/null
+            nvram commit 2>/dev/null
+        fi
+    fi
 }
 
 config_file() {
@@ -392,6 +405,297 @@ remove_top_level_block() {
     ' "$file" > "$tmp" && mv "$tmp" "$file"
 }
 
+remove_block_keys() {
+    block="$1"
+    file="$2"
+    shift 2
+    keys="$*"
+    tmp="$file.rmblockkeys.$$"
+
+    awk -v block="$block" -v keys="$keys" '
+        function indent_len(value, prefix) {
+            prefix=value
+            sub(/[^[:space:]].*$/, "", prefix)
+            return length(prefix)
+        }
+        function key_match(key) {
+            return (" " keys " ") ~ (" " key " ")
+        }
+        {
+            line=$0
+            is_top=(line ~ /^[^[:space:]#][^:]*:[[:space:]]*/)
+            if (is_top) {
+                skip=0
+                if (line ~ "^" block ":[[:space:]]*($|#)") {
+                    in_block=1
+                } else {
+                    in_block=0
+                }
+            }
+            if (in_block && !is_top) {
+                if (skip) {
+                    if (line ~ /^[[:space:]]*$/) next
+                    current_indent=indent_len(line)
+                    if (current_indent > skip_indent) next
+                    skip=0
+                }
+                stripped=line
+                sub(/^[[:space:]]+/, "", stripped)
+                key=stripped
+                sub(/:.*/, "", key)
+                if (line ~ /^[[:space:]]+[^[:space:]#][^:]*:[[:space:]]*/ && key_match(key)) {
+                    skip=1
+                    skip_indent=indent_len(line)
+                    next
+                }
+            }
+            print
+        }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+remove_block_key_value() {
+    block="$1"
+    wanted_key="$2"
+    wanted_value="$3"
+    file="$4"
+    tmp="$file.rmblockvalue.$$"
+
+    awk -v block="$block" -v wanted_key="$wanted_key" -v wanted_value="$wanted_value" '
+        function indent_len(value, prefix) {
+            prefix=value
+            sub(/[^[:space:]].*$/, "", prefix)
+            return length(prefix)
+        }
+        {
+            line=$0
+            is_top=(line ~ /^[^[:space:]#][^:]*:[[:space:]]*/)
+            if (is_top) {
+                skip=0
+                if (line ~ "^" block ":[[:space:]]*($|#)") {
+                    in_block=1
+                } else {
+                    in_block=0
+                }
+            }
+            if (in_block && !is_top) {
+                if (skip) {
+                    if (line ~ /^[[:space:]]*$/) next
+                    current_indent=indent_len(line)
+                    if (current_indent > skip_indent) next
+                    skip=0
+                }
+                stripped=line
+                sub(/^[[:space:]]+/, "", stripped)
+                key=stripped
+                sub(/:.*/, "", key)
+                value=stripped
+                sub(/^[^:]*:[[:space:]]*/, "", value)
+                sub(/[[:space:]]#.*$/, "", value)
+                gsub(/^[[:space:]"]+|[[:space:]"]+$/, "", value)
+                if (line ~ /^[[:space:]]+[^[:space:]#][^:]*:[[:space:]]*/ &&
+                    key == wanted_key && value == wanted_value) {
+                    skip=1
+                    skip_indent=indent_len(line)
+                    next
+                }
+            }
+            print
+        }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+remove_dns_proxy_entries() {
+    file="$1"
+    names_file="$2"
+    tmp="$file.rmdnsproxy.$$"
+
+    : > "$names_file" || return 1
+    awk -v names_file="$names_file" '
+        function indent_len(value, prefix) {
+            prefix=value
+            sub(/[^[:space:]].*$/, "", prefix)
+            return length(prefix)
+        }
+        function clean_value(value) {
+            sub(/[[:space:]]#.*$/, "", value)
+            gsub(/^[[:space:]"]+|[[:space:]"]+$/, "", value)
+            return value
+        }
+        function parse_item_line(line, value) {
+            value=line
+            sub(/^[[:space:]]+/, "", value)
+            if (value ~ /^-[[:space:]]*/) sub(/^-[[:space:]]*/, "", value)
+            if (value ~ /^name:[[:space:]]*/) {
+                sub(/^name:[[:space:]]*/, "", value)
+                item_name=clean_value(value)
+            } else if (value ~ /^type:[[:space:]]*/) {
+                sub(/^type:[[:space:]]*/, "", value)
+                if (clean_value(value) == "dns") item_is_dns=1
+            }
+        }
+        function flush_item(i) {
+            if (item_count == 0) return
+            if (item_is_dns) {
+                if (item_name != "") print item_name >> names_file
+            } else {
+                for (i=1; i<=item_count; i++) print item_lines[i]
+            }
+            item_count=0
+            item_name=""
+            item_is_dns=0
+        }
+        {
+            line=$0
+            is_top=(line ~ /^[^[:space:]#][^:]*:[[:space:]]*/)
+            if (is_top) {
+                if (in_proxies) flush_item()
+                if (line ~ /^proxies:[[:space:]]*($|#)/) {
+                    in_proxies=1
+                    item_indent=-1
+                    print
+                    next
+                }
+                in_proxies=0
+            }
+            if (in_proxies) {
+                if (line ~ /^[[:space:]]*-[[:space:]]*/) {
+                    current_indent=indent_len(line)
+                    if (item_indent < 0 || current_indent == item_indent) {
+                        flush_item()
+                        item_indent=current_indent
+                    }
+                }
+                if (item_indent >= 0 && indent_len(line) >= item_indent) {
+                    item_count++
+                    item_lines[item_count]=line
+                    parse_item_line(line)
+                    next
+                }
+            }
+            print
+        }
+        END {
+            if (in_proxies) flush_item()
+        }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+remove_rules_for_names() {
+    file="$1"
+    names_file="$2"
+    [ -s "$names_file" ] || return 0
+    tmp="$file.rmrules.$$"
+
+    awk -v names_file="$names_file" '
+        function indent_len(value, prefix) {
+            prefix=value
+            sub(/[^[:space:]].*$/, "", prefix)
+            return length(prefix)
+        }
+        function has_removed_name(line, i) {
+            for (i=1; i<=name_count; i++) {
+                if (names[i] != "" && index(line, names[i]) > 0) return 1
+            }
+            return 0
+        }
+        BEGIN {
+            while ((getline name < names_file) > 0) {
+                name_count++
+                names[name_count]=name
+            }
+            close(names_file)
+        }
+        {
+            line=$0
+            is_top=(line ~ /^[^[:space:]#][^:]*:[[:space:]]*/)
+            if (is_top) {
+                skip=0
+                if (line ~ /^rules:[[:space:]]*($|#)/) {
+                    in_rules=1
+                } else {
+                    in_rules=0
+                }
+            }
+            if (in_rules && !is_top) {
+                if (skip) {
+                    if (line ~ /^[[:space:]]*$/) next
+                    current_indent=indent_len(line)
+                    if (current_indent > skip_indent) next
+                    skip=0
+                }
+                if (has_removed_name(line)) {
+                    skip=1
+                    skip_indent=indent_len(line)
+                    next
+                }
+            }
+            print
+        }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+sanitize_subscription_config() {
+    file="$1"
+    dns_proxy_names="$RUN_DIR/subscription-dns-proxies.$$"
+
+    remove_top_level_block tun "$file"
+    remove_top_level_block lan-allowed-ips "$file"
+    remove_top_level_key bind-address "$file"
+    remove_top_level_key mixed-port "$file"
+    remove_top_level_key find-process-mode "$file"
+    replace_top_level_key find-process-mode "find-process-mode: off" "$file"
+    remove_block_key_value dns enhanced-mode fake-ip "$file"
+    remove_block_keys dns "$file" prefer-h3 fake-ip-range fake-ip-filter
+    remove_dns_proxy_entries "$file" "$dns_proxy_names"
+    remove_rules_for_names "$file" "$dns_proxy_names"
+    rm -f "$dns_proxy_names"
+}
+
+move_operational_keys_to_top() {
+    file="$1"
+    keys="tproxy-port find-process-mode external-controller secret external-controller-cors external-controller-unix external-controller-tls external-ui external-ui-name external-ui-url"
+    tmp_top="$file.top.$$"
+    tmp_body="$file.body.$$"
+    tmp_out="$file.out.$$"
+
+    : > "$tmp_top" || return 1
+    line="$(top_level_line mode "$file")"
+    [ -n "$line" ] && printf '%s\n' "$line" >> "$tmp_top"
+    for key in $keys; do
+        line="$(top_level_line "$key" "$file")"
+        [ -n "$line" ] && printf '%s\n' "$line" >> "$tmp_top"
+    done
+
+    awk -v keys="mode $keys" '
+        function key_match(key) {
+            return (" " keys " ") ~ (" " key " ")
+        }
+        /^[^[:space:]#][^:]*:[[:space:]]*/ {
+            key=$0
+            sub(/:.*/, "", key)
+            if (key_match(key)) next
+        }
+        { print }
+    ' "$file" > "$tmp_body" || {
+        rm -f "$tmp_top" "$tmp_body" "$tmp_out"
+        return 1
+    }
+
+    if [ -s "$tmp_top" ]; then
+        {
+            cat "$tmp_top"
+            printf '\n'
+            cat "$tmp_body"
+        } > "$tmp_out" || {
+            rm -f "$tmp_top" "$tmp_body" "$tmp_out"
+            return 1
+        }
+        mv "$tmp_out" "$file"
+    fi
+    rm -f "$tmp_top" "$tmp_body" "$tmp_out"
+}
+
 replace_dns_listen() {
     listen_line="$1"
     file="$2"
@@ -487,6 +791,7 @@ append_hook_line() {
     line="$2"
     [ -f "$file" ] || { echo "#!/bin/sh" > "$file"; chmod 755 "$file"; }
     grep -qF "$line" "$file" || echo "$line" >> "$file"
+    chmod 755 "$file" 2>/dev/null
 }
 
 download_to_stdout() {
@@ -565,12 +870,24 @@ log_subscription_network_info() {
     fi
 }
 
-validate_resolve_ip() {
-    resolve_ip="$1"
-    case "$resolve_ip" in
-        ""|*[!0-9.]*|.*|*.) return 1 ;;
-    esac
-    return 0
+subscription_response_valid() {
+    file="$1"
+    [ -s "$file" ] || return 1
+    if awk '
+        /^[[:space:]]*$/ { next }
+        /^[[:space:]]*</ { bad=1 }
+        { exit }
+        END { exit bad ? 0 : 1 }
+    ' "$file"; then
+        return 1
+    fi
+    awk '
+        /^[[:space:]]*(proxies|proxy-groups|rules|proxy-providers|rule-providers|dns|mixed-port|port|socks-port|redir-port|tproxy-port):[[:space:]]*/ {
+            found=1
+            exit
+        }
+        END { exit found ? 0 : 1 }
+    ' "$file"
 }
 
 host_resolved_ips() {
@@ -593,126 +910,50 @@ host_resolved_ips() {
     ' | awk '!seen[$0]++'
 }
 
-ip_in_list() {
-    needle="$1"
-    while read list_ip; do
-        [ "$needle" = "$list_ip" ] && return 0
-    done
-    return 1
-}
-
-host_resolves_to_wan() {
-    host="$1"
-    resolved_ips="$(host_resolved_ips "$host")"
-    [ -n "$resolved_ips" ] || return 1
-    wan_ips="$(get_wan_ips)"
-    [ -n "$wan_ips" ] || return 1
-
-    printf '%s\n' "$resolved_ips" | while read resolved_ip; do
-        [ -n "$resolved_ip" ] || continue
-        if printf '%s\n' "$wan_ips" | ip_in_list "$resolved_ip"; then
-            printf '%s\n' "$resolved_ip"
-            exit 0
-        fi
-    done
-}
-
-host_is_router_name() {
-    host="$1"
-    command -v nvram >/dev/null 2>&1 || return 1
-    for key in ddns_hostname_x ddns_hostname_old ddns_hostname_x_old ddns_hostname wan_hostname; do
-        value="$(nvram get "$key" 2>/dev/null)"
-        [ -n "$value" ] || continue
-        [ "$host" = "$value" ] && return 0
-    done
-    return 1
-}
-
-nvram_port_forward_target() {
-    wan_port="$1"
-    command -v nvram >/dev/null 2>&1 || return 1
-    vts_enabled="$(nvram get vts_enable_x 2>/dev/null)"
-    [ "$vts_enabled" = "0" ] && return 1
-    nvram get vts_rulelist 2>/dev/null | awk -v want="$wan_port" '
-        function port_match(spec, want, part, parts, range, bounds, n, i) {
-            if (spec == "" || spec == want) return 1
-            n=split(spec, parts, ",")
-            for (i=1; i<=n; i++) {
-                part=parts[i]
-                if (part == want) return 1
-                if (part ~ /^[0-9]+:[0-9]+$/) {
-                    split(part, bounds, ":")
-                    if (want + 0 >= bounds[1] + 0 && want + 0 <= bounds[2] + 0) return 1
-                }
-            }
-            return 0
-        }
-        BEGIN { RS="<"; FS=">" }
-        NF >= 5 {
-            ext=$2
-            ip=$3
-            int=$4
-            proto=$5
-            if (ip !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) next
-            if (proto != "" && proto !~ /^(TCP|BOTH|Both|both)$/) next
-            if (port_match(ext, want)) {
-                if (int == "") int=want
-                split(int, int_parts, ",")
-                int=int_parts[1]
-                split(int, int_range, ":")
-                int=int_range[1]
-                print ip ":" int
-                exit
-            }
+get_lan_ips() {
+    if command -v nvram >/dev/null 2>&1; then
+        for key in lan_ipaddr lan1_ipaddr lan2_ipaddr; do
+            value="$(nvram get "$key" 2>/dev/null)"
+            case "$value" in
+                [0-9]*.[0-9]*.[0-9]*.[0-9]*) printf '%s\n' "$value" ;;
+            esac
+        done
+    fi
+    ip addr show "$LAN_IF" 2>/dev/null | awk '
+        /inet / {
+            ip=$2
+            sub(/\/.*/, "", ip)
+            if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) print ip
         }
     '
 }
 
-iptables_port_forward_target() {
-    wan_port="$1"
-    command -v iptables >/dev/null 2>&1 || return 1
-    iptables -t nat -S 2>/dev/null | awk -v want="$wan_port" '
-        /-j DNAT/ && /--dport/ && /--to-destination/ {
-            dport=""
-            target=""
-            for (i=1; i<=NF; i++) {
-                if ($i == "--dport" && i < NF) dport=$(i+1)
-                if ($i == "--to-destination" && i < NF) target=$(i+1)
-            }
-            if (dport != want) next
-            if (target !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(:[0-9]+)?$/) next
-            if (target !~ /:/) target=target ":" want
-            print target
+first_lan_ip() {
+    get_lan_ips | awk '
+        /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {
+            print
             exit
         }
     '
 }
 
-port_forward_target() {
-    wan_port="$1"
-    target="$(nvram_port_forward_target "$wan_port")"
-    if [ -n "$target" ]; then
-        printf '%s\n' "$target"
-        return 0
-    fi
-    iptables_port_forward_target "$wan_port"
+lan_subnet_prefix() {
+    ip="$(first_lan_ip)"
+    [ -n "$ip" ] || return 1
+    printf '%s\n' "$ip" | awk -F. 'NF == 4 { print $1 "." $2 "." $3 }'
 }
 
-auto_hairpin_target() {
-    url="$1"
-    host="$(url_host "$url")"
-    port="$(url_port "$url")"
-    [ -n "$host" ] || return 1
-    [ -n "$port" ] || return 1
+subnet_scan_targets() {
+    port="$1"
+    prefix="$(lan_subnet_prefix)"
+    [ -n "$prefix" ] || return 1
 
-    wan_match="$(host_resolves_to_wan "$host")"
-    if [ -z "$wan_match" ] && ! host_is_router_name "$host"; then
-        return 1
-    fi
-    target="$(port_forward_target "$port")"
-    [ -n "$target" ] || return 1
-
-    printf '%s\n' "$target"
+    printf '127.0.0.1:%s\n' "$port"
+    i=1
+    while [ "$i" -le 254 ]; do
+        printf '%s.%s:%s\n' "$prefix" "$i" "$port"
+        i=$((i + 1))
+    done
 }
 
 detect_device_model() {
@@ -814,8 +1055,6 @@ http_get_subscription_to_file() {
     err_file="$RUN_DIR/subscription-http.err.$$"
     host="$(url_host "$url")"
     port="$(url_port "$url")"
-    resolve_ip="$(subscription_setting resolve_ip)"
-    hairpin_target=""
     headers="$(subscription_headers)"
     hwid="$(printf '%s\n' "$headers" | sed -n '1p')"
     device_os="$(printf '%s\n' "$headers" | sed -n '2p')"
@@ -826,260 +1065,55 @@ http_get_subscription_to_file() {
 
     rm -f "$dst" "$err_file"
     log_subscription_network_info "$url"
-    [ -n "$resolve_ip" ] && log "subscription host override: $host:$port -> $resolve_ip"
-    if [ -z "$resolve_ip" ]; then
-        hairpin_target="$(auto_hairpin_target "$url")"
-        [ -n "$hairpin_target" ] && log "subscription automatic hairpin target: $host:$port -> $hairpin_target"
-    fi
 
     curl_bin="$(find_command_path curl 2>/dev/null)"
-    if [ -n "$curl_bin" ]; then
-        direct_failed=""
-        if [ -n "$hairpin_target" ]; then
-            hairpin_ip="${hairpin_target%:*}"
-            hairpin_port="${hairpin_target##*:}"
-            if "$curl_bin" -fsSL --connect-timeout 20 -m 120 \
-                --connect-to "$host:$port:$hairpin_ip:$hairpin_port" \
+    [ -n "$curl_bin" ] || {
+        log "curl is required to request subscription config"
+        return 1
+    }
+
+    if "$curl_bin" -4 -fsSL --connect-timeout 10 -m 60 \
+        -A "$user_agent" \
+        -H "$accept_header" \
+        -H "x-hwid: $hwid" \
+        -H "x-device-os: $device_os" \
+        -H "x-ver-os: $ver_os" \
+        -H "x-device-model: $device_model" \
+        -o "$dst" "$url" 2>"$err_file" && subscription_response_valid "$dst"; then
+        rm -f "$err_file"
+        return 0
+    fi
+    log_http_error "curl direct subscription request failed" "$err_file"
+    rm -f "$dst" "$err_file"
+
+    scan_targets="$(subnet_scan_targets "$port")"
+    if [ -n "$scan_targets" ]; then
+        prefix="$(lan_subnet_prefix)"
+        [ -n "$prefix" ] && log "subscription scan subnet: ${prefix}.0/24 port $port"
+        while read scan_target; do
+            [ -n "$scan_target" ] || continue
+            scan_ip="${scan_target%:*}"
+            scan_port="${scan_target##*:}"
+            if "$curl_bin" -4 -fsSL --connect-timeout 1 -m 8 \
+                --connect-to "$host:$port:$scan_ip:$scan_port" \
                 -A "$user_agent" \
                 -H "$accept_header" \
                 -H "x-hwid: $hwid" \
                 -H "x-device-os: $device_os" \
                 -H "x-ver-os: $ver_os" \
                 -H "x-device-model: $device_model" \
-                -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
+                -o "$dst" "$url" 2>"$err_file" && subscription_response_valid "$dst"; then
+                log "subscription found on local address: $scan_target"
                 rm -f "$err_file"
                 return 0
             fi
-            log_http_error "curl automatic hairpin request failed" "$err_file"
             rm -f "$dst" "$err_file"
-
-            if [ "$hairpin_port" = "$port" ]; then
-                if "$curl_bin" -fsSL --connect-timeout 20 -m 120 \
-                    --resolve "$host:$port:$hairpin_ip" \
-                    -A "$user_agent" \
-                    -H "$accept_header" \
-                    -H "x-hwid: $hwid" \
-                    -H "x-device-os: $device_os" \
-                    -H "x-ver-os: $ver_os" \
-                    -H "x-device-model: $device_model" \
-                    -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
-                    rm -f "$err_file"
-                    return 0
-                fi
-                log_http_error "curl automatic hairpin resolve request failed" "$err_file"
-                rm -f "$dst" "$err_file"
-            fi
-        fi
-
-        if [ -n "$resolve_ip" ]; then
-            if "$curl_bin" -fsSL --connect-timeout 20 -m 120 \
-                --resolve "$host:$port:$resolve_ip" \
-                -A "$user_agent" \
-                -H "$accept_header" \
-                -H "x-hwid: $hwid" \
-                -H "x-device-os: $device_os" \
-                -H "x-ver-os: $ver_os" \
-                -H "x-device-model: $device_model" \
-                -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
-                rm -f "$err_file"
-                return 0
-            fi
-            log_http_error "curl subscription request with host override failed" "$err_file"
-            rm -f "$dst" "$err_file"
-
-            if "$curl_bin" -fsSL -k --connect-timeout 20 -m 120 \
-                --resolve "$host:$port:$resolve_ip" \
-                -A "$user_agent" \
-                -H "$accept_header" \
-                -H "x-hwid: $hwid" \
-                -H "x-device-os: $device_os" \
-                -H "x-ver-os: $ver_os" \
-                -H "x-device-model: $device_model" \
-                -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
-                log "subscription request succeeded with host override and insecure TLS verification"
-                rm -f "$err_file"
-                return 0
-            fi
-            log_http_error "curl insecure subscription request with host override failed" "$err_file"
-            rm -f "$dst" "$err_file"
-        fi
-
-        if "$curl_bin" -4 -fsSL --connect-timeout 20 -m 120 \
-            -A "$user_agent" \
-            -H "$accept_header" \
-            -H "x-hwid: $hwid" \
-            -H "x-device-os: $device_os" \
-            -H "x-ver-os: $ver_os" \
-            -H "x-device-model: $device_model" \
-            -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
-            rm -f "$err_file"
-            return 0
-        fi
-        log_http_error "curl IPv4 subscription request failed" "$err_file"
-        direct_failed=1
-        rm -f "$dst" "$err_file"
-
-        if [ -z "$hairpin_target" ] && [ -n "$direct_failed" ]; then
-            hairpin_target="$(port_forward_target "$port")"
-            if [ -n "$hairpin_target" ]; then
-                log "subscription fallback hairpin target: $host:$port -> $hairpin_target"
-                hairpin_ip="${hairpin_target%:*}"
-                hairpin_port="${hairpin_target##*:}"
-                if "$curl_bin" -fsSL --connect-timeout 20 -m 120 \
-                    --connect-to "$host:$port:$hairpin_ip:$hairpin_port" \
-                    -A "$user_agent" \
-                    -H "$accept_header" \
-                    -H "x-hwid: $hwid" \
-                    -H "x-device-os: $device_os" \
-                    -H "x-ver-os: $ver_os" \
-                    -H "x-device-model: $device_model" \
-                    -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
-                    rm -f "$err_file"
-                    return 0
-                fi
-                log_http_error "curl fallback hairpin request failed" "$err_file"
-                rm -f "$dst" "$err_file"
-            fi
-        fi
-
-        if "$curl_bin" -fsSL --connect-timeout 20 -m 120 \
-            -A "$user_agent" \
-            -H "$accept_header" \
-            -H "x-hwid: $hwid" \
-            -H "x-device-os: $device_os" \
-            -H "x-ver-os: $ver_os" \
-            -H "x-device-model: $device_model" \
-            -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
-            rm -f "$err_file"
-            return 0
-        fi
-        log_http_error "curl subscription request failed" "$err_file"
-        rm -f "$dst" "$err_file"
-
-        if "$curl_bin" -4 -fsSL -k --connect-timeout 20 -m 120 \
-            -A "$user_agent" \
-            -H "$accept_header" \
-            -H "x-hwid: $hwid" \
-            -H "x-device-os: $device_os" \
-            -H "x-ver-os: $ver_os" \
-            -H "x-device-model: $device_model" \
-            -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
-            log "subscription request succeeded with IPv4 and insecure TLS verification"
-            rm -f "$err_file"
-            return 0
-        fi
-        log_http_error "curl IPv4 insecure subscription request failed" "$err_file"
-        rm -f "$dst" "$err_file"
-
-        if "$curl_bin" -fsSL -k --connect-timeout 20 -m 120 \
-            -A "$user_agent" \
-            -H "$accept_header" \
-            -H "x-hwid: $hwid" \
-            -H "x-device-os: $device_os" \
-            -H "x-ver-os: $ver_os" \
-            -H "x-device-model: $device_model" \
-            -o "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
-            log "subscription request succeeded with insecure TLS verification"
-            rm -f "$err_file"
-            return 0
-        fi
-        log_http_error "curl insecure subscription request failed" "$err_file"
-        rm -f "$dst" "$err_file"
+        done <<EOF
+$scan_targets
+EOF
     fi
 
-    wget_bin="$(find_command_path wget 2>/dev/null)"
-    if [ -n "$wget_bin" ]; then
-        : > "$RUN_DIR/.wget-hsts" 2>/dev/null
-        chmod 600 "$RUN_DIR/.wget-hsts" 2>/dev/null
-
-        if HOME="$RUN_DIR" "$wget_bin" -4 \
-            --header="$accept_header" \
-            --header="x-hwid: $hwid" \
-            --header="x-device-os: $device_os" \
-            --header="x-ver-os: $ver_os" \
-            --header="x-device-model: $device_model" \
-            --user-agent="$user_agent" \
-            -O "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
-            rm -f "$err_file"
-            return 0
-        fi
-        log_http_error "wget IPv4 subscription request failed" "$err_file"
-        rm -f "$dst" "$err_file"
-
-        if HOME="$RUN_DIR" "$wget_bin" \
-            --header="$accept_header" \
-            --header="x-hwid: $hwid" \
-            --header="x-device-os: $device_os" \
-            --header="x-ver-os: $ver_os" \
-            --header="x-device-model: $device_model" \
-            --user-agent="$user_agent" \
-            -O "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
-            rm -f "$err_file"
-            return 0
-        fi
-        log_http_error "wget subscription request failed" "$err_file"
-        rm -f "$dst" "$err_file"
-
-        if HOME="$RUN_DIR" "$wget_bin" -4 \
-            --header="$accept_header" \
-            --header="x-hwid: $hwid" \
-            --header="x-device-os: $device_os" \
-            --header="x-ver-os: $ver_os" \
-            --header="x-device-model: $device_model" \
-            -U "$user_agent" \
-            -O "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
-            rm -f "$err_file"
-            return 0
-        fi
-        log_http_error "wget IPv4 short-option subscription request failed" "$err_file"
-        rm -f "$dst" "$err_file"
-
-        if HOME="$RUN_DIR" "$wget_bin" \
-            --header="$accept_header" \
-            --header="x-hwid: $hwid" \
-            --header="x-device-os: $device_os" \
-            --header="x-ver-os: $ver_os" \
-            --header="x-device-model: $device_model" \
-            -U "$user_agent" \
-            -O "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
-            rm -f "$err_file"
-            return 0
-        fi
-        log_http_error "wget short-option subscription request failed" "$err_file"
-        rm -f "$dst" "$err_file"
-
-        if HOME="$RUN_DIR" "$wget_bin" -4 --no-check-certificate \
-            --header="$accept_header" \
-            --header="x-hwid: $hwid" \
-            --header="x-device-os: $device_os" \
-            --header="x-ver-os: $ver_os" \
-            --header="x-device-model: $device_model" \
-            -U "$user_agent" \
-            -O "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
-            log "subscription request succeeded with IPv4 and wget no-check-certificate"
-            rm -f "$err_file"
-            return 0
-        fi
-        log_http_error "wget IPv4 no-check-certificate subscription request failed" "$err_file"
-        rm -f "$dst" "$err_file"
-
-        if HOME="$RUN_DIR" "$wget_bin" --no-check-certificate \
-            --header="$accept_header" \
-            --header="x-hwid: $hwid" \
-            --header="x-device-os: $device_os" \
-            --header="x-ver-os: $ver_os" \
-            --header="x-device-model: $device_model" \
-            -U "$user_agent" \
-            -O "$dst" "$url" 2>"$err_file" && [ -s "$dst" ]; then
-            log "subscription request succeeded with wget no-check-certificate"
-            rm -f "$err_file"
-            return 0
-        fi
-        log_http_error "wget no-check-certificate subscription request failed" "$err_file"
-        rm -f "$dst" "$err_file"
-    fi
-
-    log "subscription HTTP request failed with available curl/wget clients"
+    log "Не удалось получить подписку по адресу: $url"
     rm -f "$err_file"
     return 1
 }
@@ -1090,10 +1124,25 @@ subscription_setting() {
     case "$name" in
         url) key="URL" ;;
         hours) key="UPDATE_HOURS" ;;
-        resolve_ip) key="RESOLVE_IP" ;;
+        type) key="TYPE" ;;
         *) return 1 ;;
     esac
     grep -m1 "^$key=" "$SUBSCRIPTION_SETTINGS_FILE" 2>/dev/null | sed 's/^[^=]*=//;s/\r$//'
+}
+
+subscription_type() {
+    type="$(subscription_setting type)"
+    case "$type" in
+        url|remote) printf '%s\n' "url" ;;
+        local) printf '%s\n' "local" ;;
+        *)
+            if [ -n "$(subscription_setting url)" ]; then
+                printf '%s\n' "url"
+            else
+                printf '%s\n' "local"
+            fi
+            ;;
+    esac
 }
 
 subscription_update_hours() {
@@ -1107,43 +1156,41 @@ subscription_update_hours() {
 
 write_subscription_settings_file() {
     tmp_settings="$1"
-    url="$2"
-    hours="$3"
-    resolve_ip="$4"
+    type="$2"
+    url="$3"
+    hours="$4"
     rm -f "$tmp_settings" 2>/dev/null
     {
+        printf 'TYPE=%s\n' "$type"
         printf 'URL=%s\n' "$url"
         printf 'UPDATE_HOURS=%s\n' "$hours"
-        if [ -n "$resolve_ip" ]; then
-            printf 'RESOLVE_IP=%s\n' "$resolve_ip"
-        fi
     } > "$tmp_settings"
     return 0
 }
 
 save_subscription_settings() {
-    url="$1"
-    hours="$2"
+    type="$1"
+    url="$2"
+    hours="$3"
     tmp_settings=""
-    if [ "$#" -ge 3 ]; then
-        resolve_ip="$3"
-    else
-        resolve_ip="$(subscription_setting resolve_ip)"
+    case "$type" in
+        local|url) ;;
+        *) die "subscription type must be local or url" ;;
+    esac
+    if [ "$type" = "url" ] && [ -z "$url" ]; then
+        die "subscription URL is required"
     fi
     case "$hours" in
         ''|*[!0-9]*) die "subscription update interval must be a positive number of hours" ;;
     esac
     [ "$hours" -gt 0 ] 2>/dev/null || die "subscription update interval must be greater than zero"
-    if [ -n "$resolve_ip" ] && ! validate_resolve_ip "$resolve_ip"; then
-        die "subscription resolve IP must be an IPv4 address"
-    fi
     mkdir -p "$CONFIG_DIR" "$RUN_DIR" 2>/dev/null || die "cannot create subscription settings directories"
     chmod u+rwx "$CONFIG_DIR" "$RUN_DIR" 2>/dev/null
 
     for settings_dir in "$CONFIG_DIR" "$RUN_DIR" /tmp; do
         [ -d "$settings_dir" ] || continue
         tmp_settings="$settings_dir/subscription.conf.$$"
-        if write_subscription_settings_file "$tmp_settings" "$url" "$hours" "$resolve_ip" 2>/dev/null; then
+        if write_subscription_settings_file "$tmp_settings" "$type" "$url" "$hours" 2>/dev/null; then
             break
         fi
         rm -f "$tmp_settings" 2>/dev/null
@@ -1218,6 +1265,18 @@ current_version() {
     '
 }
 
+script_version_from_file() {
+    file="$1"
+    awk -F= '
+        /^SCRIPT_VERSION=/ {
+            version=$2
+            gsub(/^["'\'' ]+|["'\'' ]+$/, "", version)
+            print version
+            exit
+        }
+    ' "$file"
+}
+
 unpack_gz() {
     src="$1"
     dst="$2"
@@ -1263,6 +1322,7 @@ latest_download_url() {
 }
 
 subscription_update_config() {
+    [ "$(subscription_type)" = "url" ] || return 2
     subscription_url="$(subscription_setting url)"
     [ -n "$subscription_url" ] || return 2
 
@@ -1287,7 +1347,9 @@ subscription_update_config() {
         log "ERROR: cannot prepare subscription config"
         return 3
     }
+    sanitize_subscription_config "$tmp_merged"
     preserve_operational_config "$CONFIG_FILE" "$tmp_merged"
+    move_operational_keys_to_top "$tmp_merged"
     detect_tproxy_port "$tmp_merged" >/dev/null || {
         rm -f "$tmp_raw" "$tmp_merged"
         log "ERROR: merged subscription config has no valid tproxy-port"
@@ -1314,6 +1376,7 @@ subscription_update_config() {
 }
 
 subscription_update_if_needed() {
+    [ "$(subscription_type)" = "url" ] || return 0
     [ -n "$(subscription_setting url)" ] || return 0
     [ -f "$CONFIG_FILE" ] || { subscription_update_config; return 0; }
     subscription_is_due || return 0
@@ -1324,6 +1387,10 @@ subscription_update_if_needed() {
 subscription_update_and_reload() {
     auto="$1"
     ensure_dirs
+    [ "$(subscription_type)" = "url" ] || {
+        [ "$auto" = "auto" ] && return 0
+        die "subscription config type is local"
+    }
     [ -n "$(subscription_setting url)" ] || {
         [ "$auto" = "auto" ] && return 0
         die "subscription URL is not configured"
@@ -1337,7 +1404,13 @@ subscription_update_and_reload() {
     result="$?"
     case "$result" in
         0) ;;
-        1) return 0 ;;
+        1)
+            if is_running; then
+                log "subscription config unchanged; reapplying rules"
+                apply_rules
+            fi
+            return 0
+            ;;
         *)
             [ "$auto" = "auto" ] && return 0
             die "subscription update failed"
@@ -1470,16 +1543,45 @@ add_bypass_rules() {
     add_wan_bypass_rules "$chain"
 }
 
+routing_mode() {
+    mode="$(cat "$ROUTING_MODE_FILE" 2>/dev/null | sed 's/\r$//')"
+    case "$mode" in
+        include|exclude) printf '%s\n' "$mode" ;;
+        *) printf '%s\n' "off" ;;
+    esac
+}
+
+set_routing_mode() {
+    mode="$1"
+    case "$mode" in
+        include|exclude|off) ;;
+        *) die "routing mode must be include, exclude or off" ;;
+    esac
+    mkdir -p "$CONFIG_DIR" 2>/dev/null || die "cannot create $CONFIG_DIR"
+    printf '%s\n' "$mode" > "$ROUTING_MODE_FILE" || die "cannot write $ROUTING_MODE_FILE"
+}
+
+migrate_routing_list() {
+    [ -f "$ROUTING_FILE" ] && return 0
+    mkdir -p "$CONFIG_DIR" 2>/dev/null || return 1
+    if [ -n "$(list_items "$INCLUDE_FILE")" ]; then
+        list_items "$INCLUDE_FILE" > "$ROUTING_FILE"
+        set_routing_mode include
+    elif [ -n "$(list_items "$EXCLUDE_FILE")" ]; then
+        list_items "$EXCLUDE_FILE" > "$ROUTING_FILE"
+        set_routing_mode exclude
+    else
+        : > "$ROUTING_FILE"
+        set_routing_mode off
+    fi
+}
+
 add_exclude_rules() {
     chain="$1"
-    [ -f "$EXCLUDE_FILE" ] || return 0
-    while IFS= read -r item || [ -n "$item" ]; do
-        item="$(echo "$item" | awk '{print $1}')"
-        case "$item" in
-            ""|\#*) continue ;;
-        esac
+    [ "$(routing_mode)" = "exclude" ] || return 0
+    list_items "$ROUTING_FILE" | while IFS= read -r item || [ -n "$item" ]; do
         iptables -t mangle -A "$chain" -s "$item" -j RETURN
-    done < "$EXCLUDE_FILE"
+    done
 }
 
 list_items() {
@@ -1487,8 +1589,10 @@ list_items() {
     [ -f "$file" ] || return 0
     awk '
         {
+            sub(/\r$/, "")
             sub(/[[:space:]]#.*/, "")
             item=$1
+            sub(/\r$/, "", item)
             if (item != "" && item !~ /^#/) print item
         }
     ' "$file"
@@ -1534,7 +1638,7 @@ delete_list_items() {
 }
 
 has_include_rules() {
-    [ -n "$(list_items "$INCLUDE_FILE")" ]
+    [ "$(routing_mode)" = "include" ] && [ -n "$(list_items "$ROUTING_FILE")" ]
 }
 
 apply_mihomo_target() {
@@ -1554,7 +1658,7 @@ add_mihomo_route_rules() {
     tproxy_port="$2"
 
     if has_include_rules; then
-        list_items "$INCLUDE_FILE" | while read item; do
+        list_items "$ROUTING_FILE" | while read item; do
             apply_mihomo_target "$chain" "$item" "$tproxy_port"
         done
     else
@@ -1569,13 +1673,15 @@ apply_dns_redirect() {
     iptables -t nat -C PREROUTING -j "$NAT_CHAIN" 2>/dev/null || \
         iptables -t nat -I PREROUTING -j "$NAT_CHAIN"
 
-    list_items "$EXCLUDE_FILE" | while read item; do
-        iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p tcp --dport 53 -j RETURN
-        iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p udp --dport 53 -j RETURN
-    done
+    if [ "$(routing_mode)" = "exclude" ]; then
+        list_items "$ROUTING_FILE" | while read item; do
+            iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p tcp --dport 53 -j RETURN
+            iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p udp --dport 53 -j RETURN
+        done
+    fi
 
     if has_include_rules; then
-        list_items "$INCLUDE_FILE" | while read item; do
+        list_items "$ROUTING_FILE" | while read item; do
             iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p tcp --dport 53 -j REDIRECT --to-ports "$dns_port"
             iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p udp --dport 53 -j REDIRECT --to-ports "$dns_port"
         done
@@ -1589,6 +1695,9 @@ apply_rules() {
     cfg="$(config_file)" || die "missing $CONFIG_FILE"
     tproxy_port="$(detect_tproxy_port "$cfg")" || die "config $cfg must contain numeric tproxy-port, for example: tproxy-port: 7894"
     dns_port="$(detect_dns_port "$cfg")"
+    migrate_routing_list
+    route_mode="$(routing_mode)"
+    route_items="$(list_items "$ROUTING_FILE")"
 
     flush_rules
     load_kernel_modules
@@ -1610,6 +1719,17 @@ apply_rules() {
     apply_dns_redirect "$dns_port"
     echo "tproxy" > "$MODE_FILE"
     log "rules applied: mode=tproxy tproxy_port=$tproxy_port dns_port=$dns_port table=$ROUTE_TABLE mark=$FW_MARK"
+    case "$route_mode" in
+        include)
+            log "routing mode: include ($(printf '%s\n' "$route_items" | awk 'NF { n++ } END { print n + 0 }') item(s))"
+            ;;
+        exclude)
+            log "routing mode: exclude ($(printf '%s\n' "$route_items" | awk 'NF { n++ } END { print n + 0 }') item(s))"
+            ;;
+        *)
+            log "routing mode: off (all LAN clients are routed through Mihomo)"
+            ;;
+    esac
 }
 
 start_mihomo() {
@@ -1681,36 +1801,41 @@ install_mihomo() {
 
 exclude_mihomo() {
     ensure_dirs
+    migrate_routing_list
     case "$1" in
         show|"")
-            show_list "Excluded IP/CIDR list. These clients bypass Mihomo." "$EXCLUDE_FILE"
+            show_list "Excluded IP/CIDR list. These clients bypass Mihomo." "$ROUTING_FILE"
             ;;
         clear)
-            : > "$EXCLUDE_FILE"
+            set_routing_mode exclude
+            : > "$ROUTING_FILE"
             print_message "SUCCESS" "excluded IP list cleared"
             printf '%s\n' "excluded IP list cleared" | logger -t mihomo
             is_running && apply_rules
             ;;
         add)
             shift
+            set_routing_mode exclude
             [ "$#" -gt 0 ] || die "usage: mihomo exclude add <ip-or-cidr> [more...]"
-            append_list_items "$EXCLUDE_FILE" "$@"
+            append_list_items "$ROUTING_FILE" "$@"
             print_message "SUCCESS" "excluded IP list updated"
             printf '%s\n' "excluded IP list updated" | logger -t mihomo
             is_running && apply_rules
             ;;
         del|delete|remove)
             shift
+            set_routing_mode exclude
             [ "$#" -gt 0 ] || die "usage: mihomo exclude del <ip-or-cidr> [more...]"
-            delete_list_items "$EXCLUDE_FILE" "$@"
+            delete_list_items "$ROUTING_FILE" "$@"
             print_message "SUCCESS" "excluded IP list updated"
             printf '%s\n' "excluded IP list updated" | logger -t mihomo
             is_running && apply_rules
             ;;
         set)
             shift
-            : > "$EXCLUDE_FILE"
-            append_list_items "$EXCLUDE_FILE" "$@"
+            set_routing_mode exclude
+            : > "$ROUTING_FILE"
+            append_list_items "$ROUTING_FILE" "$@"
             print_message "SUCCESS" "excluded IP list updated"
             printf '%s\n' "excluded IP list updated" | logger -t mihomo
             is_running && apply_rules
@@ -1724,36 +1849,41 @@ exclude_mihomo() {
 
 include_mihomo() {
     ensure_dirs
+    migrate_routing_list
     case "$1" in
         show|"")
-            show_list "Included IP/CIDR list. If not empty, only these clients use Mihomo." "$INCLUDE_FILE"
+            show_list "Included IP/CIDR list. If not empty, only these clients use Mihomo." "$ROUTING_FILE"
             ;;
         clear)
-            : > "$INCLUDE_FILE"
+            set_routing_mode include
+            : > "$ROUTING_FILE"
             print_message "SUCCESS" "included IP list cleared"
             printf '%s\n' "included IP list cleared" | logger -t mihomo
             is_running && apply_rules
             ;;
         add)
             shift
+            set_routing_mode include
             [ "$#" -gt 0 ] || die "usage: mihomo include add <ip-or-cidr> [more...]"
-            append_list_items "$INCLUDE_FILE" "$@"
+            append_list_items "$ROUTING_FILE" "$@"
             print_message "SUCCESS" "included IP list updated"
             printf '%s\n' "included IP list updated" | logger -t mihomo
             is_running && apply_rules
             ;;
         del|delete|remove)
             shift
+            set_routing_mode include
             [ "$#" -gt 0 ] || die "usage: mihomo include del <ip-or-cidr> [more...]"
-            delete_list_items "$INCLUDE_FILE" "$@"
+            delete_list_items "$ROUTING_FILE" "$@"
             print_message "SUCCESS" "included IP list updated"
             printf '%s\n' "included IP list updated" | logger -t mihomo
             is_running && apply_rules
             ;;
         set)
             shift
-            : > "$INCLUDE_FILE"
-            append_list_items "$INCLUDE_FILE" "$@"
+            set_routing_mode include
+            : > "$ROUTING_FILE"
+            append_list_items "$ROUTING_FILE" "$@"
             print_message "SUCCESS" "included IP list updated"
             printf '%s\n' "included IP list updated" | logger -t mihomo
             is_running && apply_rules
@@ -1772,30 +1902,33 @@ subscription_mihomo() {
         show|"")
             url="$(subscription_setting url)"
             hours="$(subscription_update_hours)"
-            resolve_ip="$(subscription_setting resolve_ip)"
-            if [ -n "$url" ]; then
+            type="$(subscription_type)"
+            print_message "INFO" "config type: $type"
+            if [ "$type" = "url" ] && [ -n "$url" ]; then
                 print_message "INFO" "subscription URL: $url"
                 print_message "INFO" "update interval: ${hours}h"
-                if [ -n "$resolve_ip" ]; then
-                    print_message "INFO" "host override IP: $resolve_ip"
-                else
-                    print_message "INFO" "host override IP: disabled"
-                fi
                 last="$(cat "$SUBSCRIPTION_LAST_FILE" 2>/dev/null)"
                 case "$last" in
                     ''|*[!0-9]*) print_message "INFO" "last update: never" ;;
                     *) print_message "INFO" "last update epoch: $last" ;;
                 esac
             else
-                print_message "WARN" "subscription URL is not configured"
+                print_message "INFO" "using local config: $CONFIG_FILE"
             fi
             ;;
-        set)
+        local)
+            hours="$(subscription_update_hours)"
+            save_subscription_settings local "" "$hours"
+            rm -f "$SUBSCRIPTION_LAST_FILE"
+            stop_subscription_updater
+            print_message "SUCCESS" "config type set to local"
+            ;;
+        set|url)
             shift
             url="$1"
             hours="${2:-24}"
             [ -n "$url" ] || die "usage: mihomo subscription set <url> [hours]"
-            save_subscription_settings "$url" "$hours"
+            save_subscription_settings url "$url" "$hours"
             print_message "SUCCESS" "subscription settings saved"
             printf '%s\n' "subscription settings saved" | logger -t mihomo
             is_running && start_subscription_updater
@@ -1803,29 +1936,11 @@ subscription_mihomo() {
         hours|interval)
             shift
             url="$(subscription_setting url)"
-            [ -n "$url" ] || die "subscription URL is not configured"
             hours="$1"
             [ -n "$hours" ] || die "usage: mihomo subscription hours <hours>"
-            save_subscription_settings "$url" "$hours"
+            save_subscription_settings "$(subscription_type)" "$url" "$hours"
             print_message "SUCCESS" "subscription interval updated"
             is_running && start_subscription_updater
-            ;;
-        resolve)
-            shift
-            url="$(subscription_setting url)"
-            [ -n "$url" ] || die "subscription URL is not configured"
-            hours="$(subscription_update_hours)"
-            resolve_ip="$1"
-            [ -n "$resolve_ip" ] || die "usage: mihomo subscription resolve <internal-ip|clear>"
-            case "$resolve_ip" in
-                clear|disable|off|none) resolve_ip="" ;;
-            esac
-            save_subscription_settings "$url" "$hours" "$resolve_ip"
-            if [ -n "$resolve_ip" ]; then
-                print_message "SUCCESS" "subscription host override set to $resolve_ip"
-            else
-                print_message "SUCCESS" "subscription host override disabled"
-            fi
             ;;
         update)
             subscription_update_and_reload manual
@@ -1837,10 +1952,10 @@ subscription_mihomo() {
         clear|disable)
             rm -f "$SUBSCRIPTION_SETTINGS_FILE" "$SUBSCRIPTION_LAST_FILE"
             stop_subscription_updater
-            print_message "SUCCESS" "subscription disabled"
+            print_message "SUCCESS" "subscription disabled; local config will be used"
             ;;
         *)
-            print_message "INFO" "Usage: mihomo subscription {show|set|hours|resolve|update|clear}"
+            print_message "INFO" "Usage: mihomo subscription {show|local|set|hours|update|clear}"
             exit 1
             ;;
     esac
@@ -1866,6 +1981,43 @@ update_mihomo() {
     start_mihomo
 }
 
+update_script() {
+    ensure_dirs
+    ensure_script_dirs
+    mkdir -p "$DOWNLOAD_DIR" || die "cannot create $DOWNLOAD_DIR"
+
+    tmp_script="$DOWNLOAD_DIR/mihomo-script.$$"
+    rm -f "$tmp_script"
+    log "checking script update from $SCRIPT_REPO"
+    download_to_file "$SCRIPT_RAW_URL" "$tmp_script" || {
+        rm -f "$tmp_script"
+        die "cannot download script from $SCRIPT_RAW_URL"
+    }
+
+    latest="$(script_version_from_file "$tmp_script")"
+    [ -n "$latest" ] || {
+        rm -f "$tmp_script"
+        die "cannot detect remote script version"
+    }
+
+    if [ "$SCRIPT_VERSION" = "$latest" ]; then
+        rm -f "$tmp_script"
+        log "mihomo4asus script is up to date: $SCRIPT_VERSION"
+        return 0
+    fi
+
+    log "mihomo4asus script update available: $SCRIPT_VERSION -> $latest"
+    [ -f "$SCRIPT_PATH" ] && cp "$SCRIPT_PATH" "$SCRIPT_PATH.bak" 2>/dev/null
+    mv "$tmp_script" "$SCRIPT_PATH" || {
+        rm -f "$tmp_script"
+        die "cannot install updated script to $SCRIPT_PATH"
+    }
+    chmod 755 "$SCRIPT_PATH"
+    ensure_alias
+    install_hooks
+    log "mihomo4asus script updated to $latest"
+}
+
 status_mihomo() {
     ensure_alias
     arch="$(get_uname -m)"
@@ -1887,10 +2039,17 @@ status_mihomo() {
     cfg="$(config_file 2>/dev/null)"
     [ -n "$cfg" ] && print_message "INFO" "config: $cfg"
     subscription_url="$(subscription_setting url)"
-    if [ -n "$subscription_url" ]; then
+    if [ "$(subscription_type)" = "url" ] && [ -n "$subscription_url" ]; then
         print_message "INFO" "subscription: enabled, every $(subscription_update_hours)h"
     else
-        print_message "INFO" "subscription: disabled"
+        print_message "INFO" "subscription: local config"
+    fi
+    migrate_routing_list
+    print_message "INFO" "routing: $(routing_mode), list $ROUTING_FILE"
+    if [ -f "$SS_SCRIPT" ] && grep -qF "$SCRIPT_PATH start" "$SS_SCRIPT" 2>/dev/null; then
+        print_message "INFO" "autostart: enabled"
+    else
+        print_message "WARN" "autostart: hook is missing; run mihomo install"
     fi
     print_message "INFO" "core log: $LOG_FILE"
     print_message "INFO" "core log limit: $LOG_MAX_BYTES bytes"
@@ -1962,24 +2121,104 @@ setup_list_menu() {
 
 setup_mihomo() {
     ensure_dirs
+    migrate_routing_list
     while :; do
-        printf '\n%s%s%s\n' "$BOLD" "Mihomo routing setup" "$RESET"
-        printf '  1) Include list: only listed clients use Mihomo\n'
-        printf '  2) Exclude list: listed clients bypass Mihomo\n'
-        printf '  3) Show both lists\n'
-        printf '  4) Apply rules now\n'
+        route_mode="$(routing_mode)"
+        printf '\n%s%s%s\n' "$BOLD" "Mihomo routing" "$RESET"
+        print_message "INFO" "mode: $route_mode"
+        show_list "Routing list" "$ROUTING_FILE"
+        printf '\n'
+        printf '  1) Switch to include mode\n'
+        printf '  2) Switch to exclude mode\n'
+        printf '  3) Disable selective routing\n'
+        printf '  4) Edit routing list\n'
+        printf '  5) Show routed clients\n'
+        printf '  6) Restart routing rules\n'
         printf '  0) Back\n'
         printf '\nSelect option: '
         read choice
         case "$choice" in
-            1) setup_list_menu "include" "$INCLUDE_FILE" ;;
-            2) setup_list_menu "exclude" "$EXCLUDE_FILE" ;;
-            3) show_list "Include" "$INCLUDE_FILE"; show_list "Exclude" "$EXCLUDE_FILE"; pause_enter ;;
-            4) apply_rules; pause_enter ;;
+            1) set_routing_mode include; print_message "SUCCESS" "routing mode set to include"; is_running && apply_rules; pause_enter ;;
+            2) set_routing_mode exclude; print_message "SUCCESS" "routing mode set to exclude"; is_running && apply_rules; pause_enter ;;
+            3) set_routing_mode off; print_message "SUCCESS" "selective routing disabled"; is_running && apply_rules; pause_enter ;;
+            4) setup_list_menu "routing" "$ROUTING_FILE" ;;
+            5) show_routed_clients; pause_enter ;;
+            6) apply_rules; pause_enter ;;
             0) return 0 ;;
             *) print_message "WARN" "unknown option" ;;
         esac
     done
+}
+
+show_routed_clients() {
+    migrate_routing_list
+    route_mode="$(routing_mode)"
+    case "$route_mode" in
+        include)
+            print_message "INFO" "Only these clients are routed through Mihomo:"
+            show_list "Routed clients" "$ROUTING_FILE"
+            ;;
+        exclude)
+            print_message "INFO" "All LAN clients are routed through Mihomo except:"
+            show_list "Bypass clients" "$ROUTING_FILE"
+            ;;
+        *)
+            print_message "INFO" "All LAN clients are routed through Mihomo."
+            printf '  file: %s\n' "$ROUTING_FILE"
+            ;;
+    esac
+}
+
+routing_mihomo() {
+    ensure_dirs
+    migrate_routing_list
+    cmd="$1"
+    case "$cmd" in
+        show|"")
+            print_message "INFO" "routing mode: $(routing_mode)"
+            show_routed_clients
+            ;;
+        mode)
+            shift
+            [ -n "$1" ] || die "usage: mihomo routing mode <include|exclude|off>"
+            set_routing_mode "$1"
+            print_message "SUCCESS" "routing mode updated"
+            is_running && apply_rules
+            ;;
+        add)
+            shift
+            [ "$#" -gt 0 ] || die "usage: mihomo routing add <ip-or-cidr> [more...]"
+            append_list_items "$ROUTING_FILE" "$@"
+            print_message "SUCCESS" "routing list updated"
+            is_running && apply_rules
+            ;;
+        del|delete|remove)
+            shift
+            [ "$#" -gt 0 ] || die "usage: mihomo routing del <ip-or-cidr> [more...]"
+            delete_list_items "$ROUTING_FILE" "$@"
+            print_message "SUCCESS" "routing list updated"
+            is_running && apply_rules
+            ;;
+        set)
+            shift
+            : > "$ROUTING_FILE"
+            append_list_items "$ROUTING_FILE" "$@"
+            print_message "SUCCESS" "routing list replaced"
+            is_running && apply_rules
+            ;;
+        clear)
+            : > "$ROUTING_FILE"
+            print_message "SUCCESS" "routing list cleared"
+            is_running && apply_rules
+            ;;
+        restart|apply)
+            apply_rules
+            ;;
+        *)
+            print_message "INFO" "Usage: mihomo routing {show|mode|add|del|set|clear|restart}"
+            exit 1
+            ;;
+    esac
 }
 
 usage_mihomo() {
@@ -1992,24 +2231,45 @@ usage_mihomo() {
     printf '  mihomo restart       restart Mihomo\n'
     printf '  mihomo status        show core state and architecture\n'
     printf '  mihomo logs          follow Mihomo core log until Ctrl+C\n'
-    printf '  mihomo update        update Mihomo core if a new version exists\n'
-    printf '  mihomo subscription  show/set/update subscription config URL\n'
+    printf '  mihomo update        open update menu\n'
+    printf '  mihomo update core   update Mihomo core if a new version exists\n'
+    printf '  mihomo update script update mihomo4asus script from GitHub\n'
+    printf '  mihomo subscription  configure local config or subscription URL\n'
     printf '\n'
     print_message "ACTION" "Routing lists"
-    printf '  mihomo setup         interactive include/exclude setup\n'
-    printf '  mihomo include show|add|del|set|clear [ip-or-cidr...]\n'
-    printf '  mihomo exclude show|add|del|set|clear [ip-or-cidr...]\n'
+    printf '  mihomo routing show\n'
+    printf '  mihomo routing mode <include|exclude|off>\n'
+    printf '  mihomo routing add|del|set|clear [ip-or-cidr...]\n'
+    printf '  mihomo routing restart\n'
     printf '\n'
     print_message "ACTION" "Subscription config"
     printf '  mihomo subscription show\n'
+    printf '  mihomo subscription local\n'
     printf '  mihomo subscription set <url> [hours]\n'
     printf '  mihomo subscription hours <hours>\n'
-    printf '  mihomo subscription resolve <internal-ip|clear>\n'
     printf '  mihomo subscription update\n'
     printf '  mihomo subscription clear\n'
     printf '\n'
     print_message "ACTION" "Maintenance"
     printf '  mihomo uninstall     remove core, files, hooks and iptables rules\n'
+}
+
+update_menu() {
+    ensure_dirs
+    while :; do
+        printf '\n%s%s%s\n' "$BOLD" "Mihomo update" "$RESET"
+        printf '  1) Update core\n'
+        printf '  2) Update script\n'
+        printf '  0) Back\n'
+        printf '\nSelect option: '
+        read choice
+        case "$choice" in
+            1) update_mihomo; pause_enter ;;
+            2) update_script; pause_enter ;;
+            0) return 0 ;;
+            *) print_message "WARN" "unknown option" ;;
+        esac
+    done
 }
 
 subscription_setup_menu() {
@@ -2018,17 +2278,18 @@ subscription_setup_menu() {
         printf '\n%s%s%s\n' "$BOLD" "Mihomo subscription setup" "$RESET"
         subscription_mihomo show
         printf '\n'
-        printf '  1) Set URL and update interval\n'
-        printf '  2) Change update interval\n'
-        printf '  3) Update now\n'
-        printf '  4) Set host override IP\n'
-        printf '  5) Clear host override IP\n'
-        printf '  6) Disable subscription\n'
+        printf '  1) Use local router config\n'
+        printf '  2) Use subscription URL\n'
+        printf '  3) Set subscription URL\n'
+        printf '  4) Change update interval\n'
+        printf '  5) Update now\n'
+        printf '  6) Disable subscription URL\n'
         printf '  0) Back\n'
         printf '\nSelect option: '
         read choice
         case "$choice" in
-            1)
+            1) subscription_mihomo local; pause_enter ;;
+            2)
                 printf 'Enter subscription URL: '
                 read url
                 printf 'Update interval in hours [24]: '
@@ -2037,20 +2298,20 @@ subscription_setup_menu() {
                 subscription_mihomo set "$url" "$hours"
                 pause_enter
                 ;;
-            2)
+            3)
+                printf 'Enter subscription URL: '
+                read url
+                hours="$(subscription_update_hours)"
+                subscription_mihomo set "$url" "$hours"
+                pause_enter
+                ;;
+            4)
                 printf 'Update interval in hours: '
                 read hours
                 subscription_mihomo hours "$hours"
                 pause_enter
                 ;;
-            3) subscription_mihomo update; pause_enter ;;
-            4)
-                printf 'Enter internal subscription server IP: '
-                read resolve_ip
-                subscription_mihomo resolve "$resolve_ip"
-                pause_enter
-                ;;
-            5) subscription_mihomo resolve clear; pause_enter ;;
+            5) subscription_mihomo update; pause_enter ;;
             6) subscription_mihomo clear; pause_enter ;;
             0) return 0 ;;
             *) print_message "WARN" "unknown option" ;;
@@ -2063,22 +2324,22 @@ main_menu() {
         printf '\n%s%s%s\n' "$BOLD" "mihomo4asus" "$RESET"
         printf '  1) Status\n'
         printf '  2) Start\n'
-        printf '  3) Stop\n'
-        printf '  4) Restart\n'
-        printf '  5) Update core\n'
-        printf '  6) Subscription setup\n'
-        printf '  7) Routing setup\n'
-        printf '  8) Show core log\n'
-        printf '  9) Show commands\n'
+        printf '  3) Restart\n'
+        printf '  4) Stop\n'
+        printf '  5) Update\n'
+        printf '  6) Subscription\n'
+        printf '  7) Routing\n'
+        printf '  8) Logs\n'
+        printf '  9) Commands\n'
         printf '  0) Exit\n'
         printf '\nSelect option: '
         read choice
         case "$choice" in
             1) status_mihomo; pause_enter ;;
             2) start_mihomo; pause_enter ;;
-            3) stop_mihomo; pause_enter ;;
-            4) stop_mihomo; sleep 2; start_mihomo; pause_enter ;;
-            5) update_mihomo; pause_enter ;;
+            3) stop_mihomo; sleep 2; start_mihomo; pause_enter ;;
+            4) stop_mihomo; pause_enter ;;
+            5) update_menu ;;
             6) subscription_setup_menu ;;
             7) setup_mihomo ;;
             8) log_mihomo ;;
@@ -2107,8 +2368,17 @@ case "$1" in
     restart) stop_mihomo; sleep 2; start_mihomo ;;
     status) status_mihomo ;;
     log|logs) log_mihomo ;;
-    update) update_mihomo ;;
+    update)
+        shift
+        case "$1" in
+            core) update_mihomo ;;
+            script) update_script ;;
+            ""|menu) update_menu ;;
+            *) print_message "INFO" "Usage: mihomo update {core|script}"; exit 1 ;;
+        esac
+        ;;
     subscription|sub) shift; subscription_mihomo "$@" ;;
+    routing|route) shift; routing_mihomo "$@" ;;
     setup) setup_mihomo ;;
     exclude) shift; exclude_mihomo "$@" ;;
     include) shift; include_mihomo "$@" ;;
