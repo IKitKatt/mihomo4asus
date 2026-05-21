@@ -83,12 +83,12 @@ mihomo restart
 
 ## Subscription Config
 
-`mihomo4asus` can download a user Mihomo config from a subscription URL, send Remnawave HWID headers, and refresh it every N hours while Mihomo is running.
+`mihomo4asus` can download a user Mihomo config from a subscription URL, send Remnawave HWID headers, and refresh it every N hours while Mihomo is running. The default update interval is 1 hour. If the server returns `profile-update-interval`, that value is saved as the subscription update interval.
 
 Configure a subscription:
 
 ```sh
-mihomo subscription set "https://example.com/subscription.yaml" 12
+mihomo subscription set "https://example.com/subscription.yaml"
 ```
 
 Use the local router config instead of a subscription URL:
