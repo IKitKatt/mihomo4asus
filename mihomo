@@ -187,13 +187,6 @@ ensure_dirs() {
 
 ensure_script_dirs() {
     mkdir -p "$(dirname "$SCRIPT_PATH")" /jffs/scripts /jffs/configs || die "cannot create JFFS script directories"
-    if command -v nvram >/dev/null 2>&1; then
-        current="$(nvram get jffs2_scripts 2>/dev/null)"
-        if [ "$current" != "1" ]; then
-            nvram set jffs2_scripts=1 2>/dev/null
-            nvram commit 2>/dev/null
-        fi
-    fi
 }
 
 config_file() {
@@ -791,7 +784,6 @@ append_hook_line() {
     line="$2"
     [ -f "$file" ] || { echo "#!/bin/sh" > "$file"; chmod 755 "$file"; }
     grep -qF "$line" "$file" || echo "$line" >> "$file"
-    chmod 755 "$file" 2>/dev/null
 }
 
 download_to_stdout() {
