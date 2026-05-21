@@ -1866,7 +1866,44 @@ install_mihomo() {
     install_script
     install_core
     log "mihomo installed"
-    log "put local config to $CONFIG_FILE before start"
+    install_config_setup
+}
+
+install_config_setup() {
+    while :; do
+        printf '\n%s%s%s\n' "$BOLD" "Mihomo config setup" "$RESET"
+        printf '  1) Local config\n'
+        printf '  2) Subscription URL\n'
+        printf '\nSelect config method [1]: '
+        read choice
+        [ -n "$choice" ] || choice=1
+        case "$choice" in
+            1)
+                save_subscription_settings local "" "$(subscription_update_hours)"
+                stop_subscription_updater
+                log "put local config to $CONFIG_FILE before start"
+                return 0
+                ;;
+            2)
+                printf 'Enter subscription URL: '
+                read url
+                [ -n "$url" ] || {
+                    print_message "WARN" "subscription URL is required"
+                    continue
+                }
+                save_subscription_settings url "$url" "$(subscription_update_hours)"
+                if subscription_update_config; then
+                    log "subscription config saved to $SUB_CONFIG_FILE"
+                    log "config is ready; run: mihomo start"
+                    return 0
+                fi
+                die "subscription config import failed"
+                ;;
+            *)
+                print_message "WARN" "unknown option"
+                ;;
+        esac
+    done
 }
 
 exclude_mihomo() {
