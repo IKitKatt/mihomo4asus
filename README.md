@@ -114,7 +114,9 @@ If the subscription domain points to the same public IP as the router, router-or
 
 The downloader sends `x-hwid`, `x-device-os`, `x-ver-os`, `x-device-model`, and `user-agent: mihomo4asus/0.0.3`. The HWID is a SHA-256 hash from firmware version, router model, and a stable first-use date.
 
-When a downloaded config is applied, the script preserves local operational settings required for `mihomo4asus`: `tproxy-port`, UI/controller keys, `dns.listen`, and the full `sniffer` section. During subscription import only, `tun`, `mixed-port`, LAN bind allow-list keys, DNS proxy outbounds, DNS rules, and unsupported fake-ip DNS options are removed from the downloaded config; `find-process-mode` is forced to `off`. Other sections from the subscription config replace the local config.
+When a downloaded config is applied, the script preserves local operational settings required for `mihomo4asus`: `tproxy-port`, UI/controller keys, `dns.listen`, and the full `sniffer` section. During subscription import only, `tun`, `mixed-port`, LAN bind allow-list keys, DNS proxy outbounds, DNS rules, and unsupported fake-ip DNS options are removed from the downloaded config; `find-process-mode` is forced to `off`.
+
+Local config is stored in `/opt/root/mihomo/config/config.yaml`. Subscription URL config is stored separately in `/opt/root/mihomo/config/sub-config.yaml` and is used only when subscription method is `url`. Runtime settings, routing lists, and subscription state are stored in `/opt/root/mihomo/state`.
 
 ## Routing
 
