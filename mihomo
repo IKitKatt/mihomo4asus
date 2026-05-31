@@ -11,8 +11,10 @@ export MIHOMO_SCRIPT_DEPTH
 MIHOMO_HOME="${MIHOMO_HOME:-/opt/root/mihomo}"
 ROOT_DIR="${ROOT_DIR:-/opt/root}"
 MIHOMO_BIN="${MIHOMO_BIN:-$MIHOMO_HOME/mihomo}"
-MIHOMO_REPO="${MIHOMO_REPO:-MetaCubeX/mihomo}"
-MIHOMO_API="${MIHOMO_API:-https://api.github.com/repos/$MIHOMO_REPO/releases/latest}"
+STANDARD_MIHOMO_REPO="${STANDARD_MIHOMO_REPO:-MetaCubeX/mihomo}"
+SMART_MIHOMO_REPO="${SMART_MIHOMO_REPO:-legiz-ru/moshen}"
+MIHOMO_REPO="${MIHOMO_REPO:-}"
+MIHOMO_API="${MIHOMO_API:-}"
 SCRIPT_REPO="${SCRIPT_REPO:-IKitKatt/mihomo4asus}"
 SCRIPT_BRANCH="${SCRIPT_BRANCH:-main}"
 SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/$SCRIPT_REPO/$SCRIPT_BRANCH/mihomo}"
@@ -52,6 +54,7 @@ SUBSCRIPTION_SETTINGS_FILE="$STATE_DIR/subscription.conf"
 SUBSCRIPTION_LAST_FILE="$STATE_DIR/subscription.last"
 SUBSCRIPTION_HWID_DATE_FILE="$STATE_DIR/hwid.date"
 SUBSCRIPTION_PROFILE_INTERVAL_FILE="$RUN_DIR/subscription.profile-update-interval"
+CORE_TYPE_FILE="$STATE_DIR/core.type"
 MODE_FILE="$RUN_DIR/mode"
 
 if [ -t 1 ]; then
@@ -209,6 +212,54 @@ migrate_config_extras() {
             mv "$config_path" "$STATE_DIR/$config_name" 2>/dev/null || true
         fi
     done
+}
+
+core_type() {
+    if [ -n "$MIHOMO_REPO" ]; then
+        case "$MIHOMO_REPO" in
+            "$SMART_MIHOMO_REPO") printf '%s\n' "smart" ;;
+            "$STANDARD_MIHOMO_REPO") printf '%s\n' "standard" ;;
+            *) printf '%s\n' "custom" ;;
+        esac
+        return 0
+    fi
+
+    type="$(cat "$CORE_TYPE_FILE" 2>/dev/null | sed 's/\r$//')"
+    case "$type" in
+        smart) printf '%s\n' "smart" ;;
+        standard|"") printf '%s\n' "standard" ;;
+        *) printf '%s\n' "standard" ;;
+    esac
+}
+
+core_repo() {
+    case "$(core_type)" in
+        smart) printf '%s\n' "$SMART_MIHOMO_REPO" ;;
+        custom) printf '%s\n' "$MIHOMO_REPO" ;;
+        *) printf '%s\n' "$STANDARD_MIHOMO_REPO" ;;
+    esac
+}
+
+core_api() {
+    if [ -n "$MIHOMO_API" ]; then
+        printf '%s\n' "$MIHOMO_API"
+    else
+        printf 'https://api.github.com/repos/%s/releases/latest\n' "$(core_repo)"
+    fi
+}
+
+core_releases_api() {
+    printf 'https://api.github.com/repos/%s/releases?per_page=10\n' "$(core_repo)"
+}
+
+save_core_type() {
+    type="$1"
+    case "$type" in
+        standard|smart) ;;
+        *) die "core type must be standard or smart" ;;
+    esac
+    mkdir -p "$STATE_DIR" || die "cannot create $STATE_DIR"
+    printf '%s\n' "$type" > "$CORE_TYPE_FILE" || die "cannot write $CORE_TYPE_FILE"
 }
 
 config_file() {
@@ -423,6 +474,27 @@ remove_top_level_block() {
         skip { next }
         { print }
     ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+replace_literal_in_file() {
+    search="$1"
+    replacement="$2"
+    file="$3"
+    tmp="$file.replace.$$"
+
+    awk -v search="$search" -v replacement="$replacement" '
+        {
+            line=$0
+            while ((pos=index(line, search)) > 0) {
+                line=substr(line, 1, pos - 1) replacement substr(line, pos + length(search))
+            }
+            print line
+        }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+yaml_double_quote_value() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g;s/"/\\"/g'
 }
 
 remove_block_keys() {
@@ -672,9 +744,54 @@ sanitize_subscription_config() {
     rm -f "$dns_proxy_names"
 }
 
+replace_profile_smart_collector() {
+    file="$1"
+    tmp="$file.profile.$$"
+
+    awk '
+        /^profile:[[:space:]]*($|#)/ {
+            in_profile=1
+            saw_profile=1
+            print
+            next
+        }
+        in_profile && /^[^[:space:]#][^:]*:[[:space:]]*/ {
+            if (!done) print "  smart-collector-size: 100"
+            done=1
+            in_profile=0
+        }
+        in_profile && /^[[:space:]]+smart-collector-size:[[:space:]]*/ {
+            if (!done) print "  smart-collector-size: 100"
+            done=1
+            next
+        }
+        { print }
+        END {
+            if (in_profile && !done) print "  smart-collector-size: 100"
+            if (!saw_profile) {
+                print ""
+                print "profile:"
+                print "  store-selected: true"
+                print "  store-fake-ip: true"
+                print "  smart-collector-size: 100"
+            }
+        }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+apply_smart_config_defaults() {
+    file="$1"
+    [ "$(core_type)" = "smart" ] || return 0
+
+    replace_top_level_key lgbm-auto-update "lgbm-auto-update: true" "$file"
+    replace_top_level_key lgbm-update-interval "lgbm-update-interval: 72" "$file"
+    replace_top_level_key lgbm-url "lgbm-url: \"https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin\"" "$file"
+    replace_profile_smart_collector "$file"
+}
+
 move_operational_keys_to_top() {
     file="$1"
-    keys="tproxy-port find-process-mode external-controller secret external-controller-cors external-controller-unix external-controller-tls external-ui external-ui-name external-ui-url"
+    keys="tproxy-port find-process-mode lgbm-auto-update lgbm-update-interval lgbm-url external-controller secret external-controller-cors external-controller-unix external-controller-tls external-ui external-ui-name external-ui-url"
     tmp_top="$file.top.$$"
     tmp_body="$file.body.$$"
     tmp_out="$file.out.$$"
@@ -785,11 +902,6 @@ preserve_operational_config() {
         if [ -n "$listen" ]; then
             replace_dns_listen "  listen: $listen" "$target_file"
         fi
-    else
-        for key in external-controller external-controller-cors external-controller-unix external-controller-tls secret external-ui external-ui-name external-ui-url; do
-            remove_top_level_key "$key" "$target_file"
-        done
-        remove_top_level_block sniffer "$target_file"
     fi
 
     if ! has_top_level_key tproxy-port "$target_file"; then
@@ -1068,6 +1180,246 @@ subscription_headers() {
     printf '%s\n' "$user_agent"
 }
 
+subscription_header_value() {
+    name="$1"
+    headers="$(subscription_headers)"
+    case "$name" in
+        hwid) printf '%s\n' "$headers" | sed -n '1p' ;;
+        device_os) printf '%s\n' "$headers" | sed -n '2p' ;;
+        ver_os) printf '%s\n' "$headers" | sed -n '3p' ;;
+        device_model) printf '%s\n' "$headers" | sed -n '4p' ;;
+        user_agent) printf '%s\n' "$headers" | sed -n '5p' ;;
+        *) return 1 ;;
+    esac
+}
+
+provider_update_interval_seconds() {
+    hours="$(subscription_update_hours)"
+    case "$hours" in
+        ''|*[!0-9]*) hours=1 ;;
+    esac
+    [ "$hours" -gt 0 ] 2>/dev/null || hours=1
+    printf '%s\n' "$((hours * 3600))"
+}
+
+render_subscription_placeholders() {
+    file="$1"
+    url="$2"
+    interval_seconds="$(provider_update_interval_seconds)"
+    hwid="$(subscription_header_value hwid)"
+    device_os="$(subscription_header_value device_os)"
+    ver_os="$(subscription_header_value ver_os)"
+    device_model="$(subscription_header_value device_model)"
+    user_agent="$(subscription_header_value user_agent)"
+
+    replace_literal_in_file '$subscription_url$' "$url" "$file"
+    replace_literal_in_file '$profile-update-interval$' "$interval_seconds" "$file"
+    replace_literal_in_file '$x-hwid$' "$hwid" "$file"
+    replace_literal_in_file '$x-device-os$' "$device_os" "$file"
+    replace_literal_in_file '$x-ver-os$' "$ver_os" "$file"
+    replace_literal_in_file '$x-device-model$' "$device_model" "$file"
+    replace_literal_in_file '$User-Agent$' "$user_agent" "$file"
+    replace_literal_in_file '$user-agent$' "$user_agent" "$file"
+}
+
+ensure_subscription_provider_headers() {
+    file="$1"
+    tmp="$file.providerheaders.$$"
+    hwid="$(yaml_double_quote_value "$(subscription_header_value hwid)")"
+    device_os="$(yaml_double_quote_value "$(subscription_header_value device_os)")"
+    ver_os="$(yaml_double_quote_value "$(subscription_header_value ver_os)")"
+    device_model="$(yaml_double_quote_value "$(subscription_header_value device_model)")"
+    user_agent="$(yaml_double_quote_value "$(subscription_header_value user_agent)")"
+
+    has_top_level_block proxy-providers "$file" || return 0
+    grep -q '^[[:space:]][[:space:]]subscription:[[:space:]]*' "$file" 2>/dev/null || return 0
+
+    awk -v hwid="$hwid" -v device_os="$device_os" -v ver_os="$ver_os" -v device_model="$device_model" -v user_agent="$user_agent" '
+        function print_header() {
+            print "    header:"
+            print "      User-Agent:"
+            print "        - \"" user_agent "\""
+            print "      x-hwid:"
+            print "        - \"" hwid "\""
+            print "      x-device-os:"
+            print "        - \"" device_os "\""
+            print "      x-ver-os:"
+            print "        - \"" ver_os "\""
+            print "      x-device-model:"
+            print "        - \"" device_model "\""
+            inserted=1
+        }
+        /^proxy-providers:[[:space:]]*($|#)/ {
+            in_providers=1
+            print
+            next
+        }
+        in_providers && /^[^[:space:]#][^:]*:[[:space:]]*/ {
+            if (in_subscription && !inserted) print_header()
+            in_providers=0
+            in_subscription=0
+            skipping_header=0
+        }
+        in_providers && /^  subscription:[[:space:]]*($|#)/ {
+            if (in_subscription && !inserted) print_header()
+            in_subscription=1
+            inserted=0
+            skipping_header=0
+            print
+            next
+        }
+        in_subscription && /^  [^[:space:]#][^:]*:[[:space:]]*/ {
+            if (!inserted) print_header()
+            in_subscription=0
+            skipping_header=0
+        }
+        in_subscription && /^    header:[[:space:]]*($|#)/ {
+            if (!inserted) print_header()
+            skipping_header=1
+            next
+        }
+        skipping_header {
+            if ($0 ~ /^      / || $0 ~ /^    [[:space:]]*$/) next
+            skipping_header=0
+        }
+        { print }
+        END {
+            if (in_subscription && !inserted) print_header()
+        }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+generate_provider_subscription_config() {
+    url="$1"
+    file="$2"
+    url_q="$(yaml_double_quote_value "$url")"
+    interval_seconds="$(provider_update_interval_seconds)"
+    hwid="$(yaml_double_quote_value "$(subscription_header_value hwid)")"
+    device_os="$(yaml_double_quote_value "$(subscription_header_value device_os)")"
+    ver_os="$(yaml_double_quote_value "$(subscription_header_value ver_os)")"
+    device_model="$(yaml_double_quote_value "$(subscription_header_value device_model)")"
+    user_agent="$(yaml_double_quote_value "$(subscription_header_value user_agent)")"
+
+    {
+        printf '%s\n' "mode: rule"
+        printf '%s\n' "log-level: error"
+        printf '%s\n' "ipv6: false"
+        printf '%s\n' "allow-lan: true"
+        printf '%s\n' "unified-delay: true"
+        printf '%s\n' "tcp-concurrent: true"
+        printf '%s\n' "find-process-mode: off"
+        printf '%s\n' "tproxy-port: 7894"
+        printf '%s\n' "external-controller: 0.0.0.0:9090"
+        printf '%s\n' "external-ui: ./ui"
+        printf '%s\n' "external-ui-name: zashboard"
+        printf '%s\n' "external-ui-url: \"https://github.com/Zephyruso/zashboard/archive/refs/heads/gh-pages.zip\""
+        if [ "$(core_type)" = "smart" ]; then
+            printf '%s\n' "lgbm-auto-update: true"
+            printf '%s\n' "lgbm-update-interval: 72"
+            printf '%s\n' "lgbm-url: \"https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin\""
+        fi
+        printf '%s\n' ""
+        printf '%s\n' "profile:"
+        printf '%s\n' "  store-selected: true"
+        printf '%s\n' "  store-fake-ip: true"
+        [ "$(core_type)" = "smart" ] && printf '%s\n' "  smart-collector-size: 100"
+        printf '%s\n' ""
+        printf '%s\n' "dns:"
+        printf '%s\n' "  enable: true"
+        printf '%s\n' "  listen: 0.0.0.0:1053"
+        printf '%s\n' "  ipv6: false"
+        printf '%s\n' "  enhanced-mode: redir-host"
+        printf '%s\n' "  use-hosts: true"
+        printf '%s\n' "  default-nameserver:"
+        printf '%s\n' "    - https://9.9.9.9/dns-query"
+        printf '%s\n' "    - https://8.8.8.8/dns-query"
+        printf '%s\n' "  proxy-server-nameserver:"
+        printf '%s\n' "    - https://9.9.9.9/dns-query"
+        printf '%s\n' "    - https://1.1.1.1/dns-query"
+        printf '%s\n' "  direct-nameserver:"
+        printf '%s\n' "    - https://77.88.8.8/dns-query"
+        printf '%s\n' "    - https://8.8.8.8/dns-query"
+        printf '%s\n' "  nameserver:"
+        printf '%s\n' "    - https://9.9.9.9/dns-query"
+        printf '%s\n' "    - https://8.8.8.8/dns-query"
+        printf '%s\n' ""
+        printf '%s\n' "proxy-providers:"
+        printf '%s\n' "  subscription:"
+        printf '%s\n' "    type: http"
+        printf '%s\n' "    url: \"$url_q\""
+        printf '%s\n' "    path: ./proxy_providers/subscription.yaml"
+        printf '%s\n' "    interval: $interval_seconds"
+        printf '%s\n' "    proxy: DIRECT"
+        printf '%s\n' "    health-check:"
+        printf '%s\n' "      enable: true"
+        printf '%s\n' "      lazy: true"
+        printf '%s\n' "      interval: 600"
+        printf '%s\n' "      timeout: 5000"
+        printf '%s\n' "      url: https://www.gstatic.com/generate_204"
+        printf '%s\n' "    header:"
+        printf '%s\n' "      User-Agent:"
+        printf '%s\n' "        - \"$user_agent\""
+        printf '%s\n' "      x-hwid:"
+        printf '%s\n' "        - \"$hwid\""
+        printf '%s\n' "      x-device-os:"
+        printf '%s\n' "        - \"$device_os\""
+        printf '%s\n' "      x-ver-os:"
+        printf '%s\n' "        - \"$ver_os\""
+        printf '%s\n' "      x-device-model:"
+        printf '%s\n' "        - \"$device_model\""
+        printf '%s\n' ""
+        printf '%s\n' "proxies:"
+        printf '%s\n' "  - name: DIRECT"
+        printf '%s\n' "    type: direct"
+        printf '%s\n' "    udp: true"
+        printf '%s\n' ""
+        printf '%s\n' "proxy-groups:"
+        printf '%s\n' "  - name: PROXY"
+        printf '%s\n' "    type: select"
+        printf '%s\n' "    proxies:"
+        if [ "$(core_type)" = "smart" ]; then
+            printf '%s\n' "      - SMART"
+        else
+            printf '%s\n' "      - AUTO"
+        fi
+        printf '%s\n' "      - DIRECT"
+        printf '%s\n' "    use:"
+        printf '%s\n' "      - subscription"
+        if [ "$(core_type)" = "smart" ]; then
+            printf '%s\n' ""
+            printf '%s\n' "  - name: SMART"
+            printf '%s\n' "    type: smart"
+            printf '%s\n' "    uselightgbm: true"
+            printf '%s\n' "    collectdata: false"
+            printf '%s\n' "    sample-rate: 1"
+            printf '%s\n' "    use:"
+            printf '%s\n' "      - subscription"
+        else
+            printf '%s\n' ""
+            printf '%s\n' "  - name: AUTO"
+            printf '%s\n' "    type: url-test"
+            printf '%s\n' "    url: https://www.gstatic.com/generate_204"
+            printf '%s\n' "    interval: 300"
+            printf '%s\n' "    tolerance: 100"
+            printf '%s\n' "    lazy: true"
+            printf '%s\n' "    use:"
+            printf '%s\n' "      - subscription"
+        fi
+        printf '%s\n' ""
+        printf '%s\n' "rules:"
+        printf '%s\n' "  - IP-CIDR,0.0.0.0/8,DIRECT,no-resolve"
+        printf '%s\n' "  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve"
+        printf '%s\n' "  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve"
+        printf '%s\n' "  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve"
+        printf '%s\n' "  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve"
+        printf '%s\n' "  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve"
+        printf '%s\n' "  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve"
+        printf '%s\n' "  - IP-CIDR,224.0.0.0/4,DIRECT,no-resolve"
+        printf '%s\n' "  - IP-CIDR,240.0.0.0/4,DIRECT,no-resolve"
+        printf '%s\n' "  - MATCH,PROXY"
+    } > "$file"
+}
+
 subscription_profile_update_interval() {
     headers_file="$1"
     [ -s "$headers_file" ] || return 1
@@ -1305,7 +1657,7 @@ touch_subscription_last() {
 }
 
 latest_version() {
-    download_to_stdout "$MIHOMO_API" | awk '
+    download_to_stdout "$(core_api)" | awk '
         /"tag_name":/ {
             tag=$0
             gsub(/^.*"tag_name":[[:space:]]*"/, "", tag)
@@ -1370,7 +1722,29 @@ detect_asset_pattern() {
 
 latest_download_url() {
     pattern="$(detect_asset_pattern)"
-    download_to_stdout "$MIHOMO_API" | awk -v pattern="$pattern" '
+    url="$(download_to_stdout "$(core_api)" | awk -v pattern="$pattern" '
+        /"browser_download_url":/ {
+            url=$0
+            gsub(/^.*"browser_download_url":[[:space:]]*"/, "", url)
+            gsub(/".*$/, "", url)
+            if (url ~ pattern &&
+                url !~ /android/ &&
+                url !~ /freebsd/ &&
+                url !~ /darwin/ &&
+                url !~ /windows/ &&
+                url !~ /compatible/ &&
+                url !~ /go[0-9]+/) {
+                print url
+                exit
+            }
+        }
+    ')"
+    if [ -n "$url" ]; then
+        printf '%s\n' "$url"
+        return 0
+    fi
+
+    download_to_stdout "$(core_releases_api)" | awk -v pattern="$pattern" '
         /"browser_download_url":/ {
             url=$0
             gsub(/^.*"browser_download_url":[[:space:]]*"/, "", url)
@@ -1411,13 +1785,25 @@ subscription_update_config() {
         return 3
     }
 
-    cp "$tmp_raw" "$tmp_merged" || {
-        rm -f "$tmp_raw" "$tmp_merged"
-        log "ERROR: cannot prepare subscription config"
-        return 3
-    }
+    if has_top_level_block proxy-providers "$tmp_raw"; then
+        cp "$tmp_raw" "$tmp_merged" || {
+            rm -f "$tmp_raw" "$tmp_merged"
+            log "ERROR: cannot prepare subscription config"
+            return 3
+        }
+        render_subscription_placeholders "$tmp_merged" "$subscription_url"
+        ensure_subscription_provider_headers "$tmp_merged"
+    else
+        log "subscription response has no proxy-providers; generating provider-based wrapper"
+        generate_provider_subscription_config "$subscription_url" "$tmp_merged" || {
+            rm -f "$tmp_raw" "$tmp_merged"
+            log "ERROR: cannot generate provider subscription config"
+            return 3
+        }
+    fi
     sanitize_subscription_config "$tmp_merged"
     preserve_operational_config "$CONFIG_FILE" "$tmp_merged"
+    apply_smart_config_defaults "$tmp_merged"
     move_operational_keys_to_top "$tmp_merged"
     detect_tproxy_port "$tmp_merged" >/dev/null || {
         rm -f "$tmp_raw" "$tmp_merged"
@@ -1498,11 +1884,12 @@ subscription_update_and_reload() {
 install_core() {
     mkdir -p "$DOWNLOAD_DIR" || die "cannot create $DOWNLOAD_DIR"
     url="$(latest_download_url)"
-    [ -n "$url" ] || die "cannot find suitable Mihomo release asset for $(get_uname -m)"
+    [ -n "$url" ] || die "cannot find suitable Mihomo release asset for $(get_uname -m) in $(core_repo)"
 
     archive="$DOWNLOAD_DIR/mihomo.gz"
     tmp_bin="$DOWNLOAD_DIR/mihomo"
 
+    log "downloading $(core_type) core from $(core_repo)"
     log "downloading $url"
     download_to_file "$url" "$archive" || die "download failed"
     unpack_gz "$archive" "$tmp_bin" || die "cannot unpack $archive"
@@ -1864,16 +2251,50 @@ install_mihomo() {
     ensure_dirs
     rm -f "$MIHOMO_HOME/mihomo-debug.log" "$RUN_DIR/mihomo-supervisor.pid" "$RUN_DIR/stop.flag" 2>/dev/null
     install_script
+    install_core_setup
     install_core
     log "mihomo installed"
     install_config_setup
+}
+
+install_core_setup() {
+    current="$(core_type)"
+    case "$current" in
+        smart) default=2 ;;
+        *) default=1 ;;
+    esac
+
+    while :; do
+        printf '\n%s%s%s\n' "$BOLD" "Mihomo core setup" "$RESET"
+        print_message "INFO" "current core: $current ($(core_repo))"
+        printf '  1) Standard (%s)\n' "$STANDARD_MIHOMO_REPO"
+        printf '  2) Smart (%s)\n' "$SMART_MIHOMO_REPO"
+        printf '\nSelect core type [%s]: ' "$default"
+        read choice
+        [ -n "$choice" ] || choice="$default"
+        case "$choice" in
+            1)
+                save_core_type standard
+                print_message "SUCCESS" "core type set to standard"
+                return 0
+                ;;
+            2)
+                save_core_type smart
+                print_message "SUCCESS" "core type set to smart"
+                return 0
+                ;;
+            *)
+                print_message "WARN" "unknown option"
+                ;;
+        esac
+    done
 }
 
 install_config_setup() {
     while :; do
         printf '\n%s%s%s\n' "$BOLD" "Mihomo config setup" "$RESET"
         printf '  1) Local config\n'
-        printf '  2) Subscription URL\n'
+        printf '  2) Subscription URL (proxy-providers)\n'
         printf '\nSelect config method [1]: '
         read choice
         [ -n "$choice" ] || choice=1
@@ -1893,7 +2314,7 @@ install_config_setup() {
                 }
                 save_subscription_settings url "$url" "$(subscription_update_hours)"
                 if subscription_update_config; then
-                    log "subscription config saved to $SUB_CONFIG_FILE"
+                    log "provider subscription config saved to $SUB_CONFIG_FILE"
                     log "config is ready; run: mihomo start"
                     return 0
                 fi
@@ -2014,6 +2435,7 @@ subscription_mihomo() {
             if [ "$sub_type" = "url" ] && [ -n "$url" ]; then
                 print_message "INFO" "subscription URL: $url"
                 print_message "INFO" "subscription config: $SUB_CONFIG_FILE"
+                print_message "INFO" "subscription mode: proxy-providers with HWID headers"
                 print_message "INFO" "update interval: ${hours}h"
                 last="$(cat "$SUBSCRIPTION_LAST_FILE" 2>/dev/null)"
                 case "$last" in
@@ -2038,6 +2460,7 @@ subscription_mihomo() {
             [ -n "$url" ] || die "usage: mihomo subscription set <url>"
             save_subscription_settings url "$url" "$hours"
             print_message "SUCCESS" "subscription settings saved"
+            print_message "INFO" "run: mihomo subscription update"
             printf '%s\n' "subscription settings saved" | logger -t mihomo
             is_running && start_subscription_updater
             ;;
@@ -2064,6 +2487,35 @@ subscription_mihomo() {
             ;;
         *)
             print_message "INFO" "Usage: mihomo subscription {show|local|set|hours|update|clear}"
+            exit 1
+            ;;
+    esac
+}
+
+core_mihomo() {
+    ensure_dirs
+    cmd="$1"
+    case "$cmd" in
+        show|"")
+            print_message "INFO" "core type: $(core_type)"
+            print_message "INFO" "core repo: $(core_repo)"
+            print_message "INFO" "core api: $(core_api)"
+            ;;
+        set)
+            shift
+            type="$1"
+            [ -n "$type" ] || die "usage: mihomo core set <standard|smart>"
+            save_core_type "$type"
+            print_message "SUCCESS" "core type set to $type"
+            print_message "INFO" "run: mihomo update core"
+            ;;
+        standard|smart)
+            save_core_type "$cmd"
+            print_message "SUCCESS" "core type set to $cmd"
+            print_message "INFO" "run: mihomo update core"
+            ;;
+        *)
+            print_message "INFO" "Usage: mihomo core {show|set <standard|smart>|standard|smart}"
             exit 1
             ;;
     esac
@@ -2141,6 +2593,8 @@ status_mihomo() {
         print_message "WARN" "mihomo: not running"
     fi
     print_message "INFO" "architecture: $arch"
+    print_message "INFO" "core type: $(core_type)"
+    print_message "INFO" "core repo: $(core_repo)"
     [ -x "$MIHOMO_BIN" ] && print_message "INFO" "core: $MIHOMO_BIN"
     version="$(current_version)"
     [ -n "$version" ] && print_message "INFO" "version: $version"
@@ -2358,13 +2812,18 @@ usage_mihomo() {
     printf '  mihomo update        open update menu\n'
     printf '  mihomo update core   update Mihomo core if a new version exists\n'
     printf '  mihomo update script update mihomo4asus script from GitHub\n'
-    printf '  mihomo subscription  configure local config or subscription URL\n'
+    printf '  mihomo core          show or switch standard/smart core\n'
+    printf '  mihomo subscription  configure local config or provider subscription URL\n'
     printf '\n'
     print_message "ACTION" "Routing lists"
     printf '  mihomo routing show\n'
     printf '  mihomo routing mode <include|exclude|off>\n'
     printf '  mihomo routing add|del|set|clear [ip-or-cidr...]\n'
     printf '  mihomo routing restart\n'
+    printf '\n'
+    print_message "ACTION" "Core config"
+    printf '  mihomo core show\n'
+    printf '  mihomo core set <standard|smart>\n'
     printf '\n'
     print_message "ACTION" "Subscription config"
     printf '  mihomo subscription show\n'
@@ -2437,7 +2896,7 @@ subscription_method_menu() {
         printf '\n%s%s%s\n' "$BOLD" "Switch sub method" "$RESET"
         print_message "INFO" "current method: $(subscription_type)"
         printf '  1) Local\n'
-        printf '  2) Subscription URL\n'
+        printf '  2) Subscription URL (proxy-providers)\n'
         printf '  0) Back\n'
         printf '\nSelect option: '
         read choice
@@ -2514,6 +2973,7 @@ case "$1" in
             *) print_message "INFO" "Usage: mihomo update {core|script}"; exit 1 ;;
         esac
         ;;
+    core) shift; core_mihomo "$@" ;;
     subscription|sub) shift; subscription_mihomo "$@" ;;
     routing|route) shift; routing_mihomo "$@" ;;
     setup) setup_mihomo ;;

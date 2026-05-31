@@ -5,6 +5,8 @@ Minimal **Mihomo** TProxy runner for **ASUSWRT-Merlin** routers with **Entware**
 ## Features
 
 - Router-level Mihomo TProxy routing with DNS redirection for LAN clients.
+- Standard and Smart Mihomo core selection.
+- Provider-based subscription configs.
 - HWID subscription headers.
 - Remote subscription URL import with automatic refresh.
 - Separate local and subscription configs.
@@ -27,10 +29,15 @@ mkdir -p /jffs/addons/mihomo && wget -O /jffs/addons/mihomo/mihomo https://raw.g
 
 The installer creates the required folders, installs the script to `/jffs/addons/mihomo/mihomo`, creates the `mihomo` command in `/opt/bin/mihomo`, downloads the correct Mihomo core for the router architecture, and installs the core to `/opt/root/mihomo/mihomo`.
 
-During first install, choose the config method:
+During first install, choose the core type:
+
+- `Standard`: downloads `MetaCubeX/mihomo`.
+- `Smart`: downloads `legiz-ru/moshen` and enables LightGBM defaults in generated subscription configs.
+
+Then choose the config method:
 
 - `Local config`: put your Mihomo YAML into `/opt/root/mihomo/config/config.yaml`.
-- `Subscription URL`: paste the URL during install; the script downloads and prepares `/opt/root/mihomo/config/sub-config.yaml`.
+- `Subscription URL`: paste the URL during install; the script prepares `/opt/root/mihomo/config/sub-config.yaml` with `proxy-providers` and Remnawave HWID headers.
 
 After a successful subscription import, run:
 
@@ -96,6 +103,7 @@ mihomo restart
 - `mihomo update` - opens the update menu.
 - `mihomo update core` - updates the Mihomo core.
 - `mihomo update script` - updates this script from `IKitKatt/mihomo4asus`.
+- `mihomo core` - shows or switches the standard/smart core type.
 - `mihomo subscription` - configures local or URL config mode.
 - `mihomo routing` - manages `routing.list` and include/exclude/off routing mode.
 - `mihomo setup` - opens the interactive routing setup.
@@ -103,13 +111,21 @@ mihomo restart
 
 ## Subscription Config
 
-`mihomo4asus` can download a user Mihomo config from a subscription URL, send Remnawave HWID headers, and refresh it every N hours while Mihomo is running. The default update interval is 1 hour. If the server returns `profile-update-interval`, that value is saved as the subscription update interval.
+`mihomo4asus` can use a subscription URL through Mihomo `proxy-providers`, send Remnawave HWID headers, and refresh it every N hours while Mihomo is running. The default update interval is 1 hour. If the server returns `profile-update-interval`, that value is saved as the subscription update interval and converted to seconds for the provider interval.
 
 Use a subscription URL:
 
 ```sh
 mihomo subscription set "https://example.com/subscription.yaml"
 mihomo subscription update
+```
+
+Switch core type:
+
+```sh
+mihomo core set standard
+mihomo core set smart
+mihomo update core
 ```
 
 Use the local router config instead:
@@ -138,6 +154,18 @@ The downloader sends:
 The HWID is a SHA-256 hash from firmware version, router model, and a stable first-use date.
 
 When a downloaded config is applied, the script preserves local operational settings required for `mihomo4asus`: `tproxy-port`, UI/controller keys, `dns.listen`, and the full `sniffer` section. During subscription import only, `tun`, `mixed-port`, LAN bind allow-list keys, DNS proxy outbounds, DNS rules, and unsupported fake-ip DNS options are removed from the downloaded config; `find-process-mode` is forced to `off`.
+
+If the Remnawave response already contains `proxy-providers`, placeholders such as `$subscription_url$`, `$x-hwid$`, `$x-device-os$`, `$x-ver-os$`, `$x-device-model$`, `$User-Agent$`, and `$profile-update-interval$` are rendered locally. If the response has no `proxy-providers`, the script generates a provider-based wrapper config and points it at the subscription URL with the same HWID headers.
+
+For Smart core, generated/provider configs include:
+
+```yaml
+lgbm-auto-update: true
+lgbm-update-interval: 72
+lgbm-url: "https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin"
+profile:
+  smart-collector-size: 100
+```
 
 ## Routing
 
@@ -189,5 +217,6 @@ This stops Mihomo, removes routing rules, removes boot hook lines, deletes `/opt
 ## Thanks To
 
 - [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) for the Mihomo core.
+- [legiz-ru/moshen](https://github.com/legiz-ru/moshen) for the Smart core option.
 - [Dr4tez/sing-box4asus](https://github.com/Dr4tez/sing-box4asus) for the original ASUSWRT-Merlin script approach.
 - [Zephyruso/zashboard](https://github.com/Zephyruso/zashboard) for the dashboard.
