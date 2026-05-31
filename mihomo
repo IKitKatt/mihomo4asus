@@ -12,7 +12,8 @@ MIHOMO_HOME="${MIHOMO_HOME:-/opt/root/mihomo}"
 ROOT_DIR="${ROOT_DIR:-/opt/root}"
 MIHOMO_BIN="${MIHOMO_BIN:-$MIHOMO_HOME/mihomo}"
 STANDARD_MIHOMO_REPO="${STANDARD_MIHOMO_REPO:-MetaCubeX/mihomo}"
-SMART_MIHOMO_REPO="${SMART_MIHOMO_REPO:-legiz-ru/moshen}"
+SMART_MIHOMO_REPO="${SMART_MIHOMO_REPO:-vernesong/mihomo}"
+SMART_MIHOMO_TAG="${SMART_MIHOMO_TAG:-Prerelease-Alpha}"
 MIHOMO_REPO="${MIHOMO_REPO:-}"
 MIHOMO_API="${MIHOMO_API:-}"
 SCRIPT_REPO="${SCRIPT_REPO:-IKitKatt/mihomo4asus}"
@@ -245,6 +246,8 @@ core_repo() {
 core_api() {
     if [ -n "$MIHOMO_API" ]; then
         printf '%s\n' "$MIHOMO_API"
+    elif [ "$(core_type)" = "smart" ]; then
+        printf 'https://api.github.com/repos/%s/releases/tags/%s\n' "$(core_repo)" "$SMART_MIHOMO_TAG"
     else
         printf 'https://api.github.com/repos/%s/releases/latest\n' "$(core_repo)"
     fi
@@ -1578,6 +1581,7 @@ latest_download_url() {
         printf '%s\n' "$url"
         return 0
     fi
+    [ "$(core_type)" = "smart" ] && return 1
 
     download_to_stdout "$(core_releases_api)" | awk -v pattern="$pattern" '
         /"browser_download_url":/ {
@@ -1709,7 +1713,12 @@ subscription_update_and_reload() {
 install_core() {
     mkdir -p "$DOWNLOAD_DIR" || die "cannot create $DOWNLOAD_DIR"
     url="$(latest_download_url)"
-    [ -n "$url" ] || die "cannot find suitable Mihomo release asset for $(get_uname -m) in $(core_repo)"
+    if [ -z "$url" ]; then
+        if [ "$(core_type)" = "smart" ]; then
+            die "cannot find suitable smart Mihomo release asset for $(get_uname -m) in $(core_repo) tag $SMART_MIHOMO_TAG"
+        fi
+        die "cannot find suitable Mihomo release asset for $(get_uname -m) in $(core_repo)"
+    fi
 
     archive="$DOWNLOAD_DIR/mihomo.gz"
     tmp_bin="$DOWNLOAD_DIR/mihomo"
@@ -2101,7 +2110,7 @@ install_core_setup() {
         printf '\n%s%s%s\n' "$BOLD" "Mihomo core setup" "$RESET"
         print_message "INFO" "current core: $current ($(core_repo))"
         printf '  1) Standard (%s)\n' "$STANDARD_MIHOMO_REPO"
-        printf '  2) Smart (%s)\n' "$SMART_MIHOMO_REPO"
+        printf '  2) Smart (%s, %s)\n' "$SMART_MIHOMO_REPO" "$SMART_MIHOMO_TAG"
         printf '\nSelect core type [%s]: ' "$default"
         read choice
         [ -n "$choice" ] || choice="$default"
@@ -2409,6 +2418,7 @@ core_mihomo() {
         show|"")
             print_message "INFO" "core type: $(core_type)"
             print_message "INFO" "core repo: $(core_repo)"
+            [ "$(core_type)" = "smart" ] && print_message "INFO" "smart tag: $SMART_MIHOMO_TAG"
             print_message "INFO" "core api: $(core_api)"
             ;;
         set)
@@ -2505,6 +2515,7 @@ status_mihomo() {
     print_message "INFO" "architecture: $arch"
     print_message "INFO" "core type: $(core_type)"
     print_message "INFO" "core repo: $(core_repo)"
+    [ "$(core_type)" = "smart" ] && print_message "INFO" "smart tag: $SMART_MIHOMO_TAG"
     [ -x "$MIHOMO_BIN" ] && print_message "INFO" "core: $MIHOMO_BIN"
     version="$(current_version)"
     [ -n "$version" ] && print_message "INFO" "version: $version"
