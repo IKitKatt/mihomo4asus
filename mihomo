@@ -803,7 +803,7 @@ apply_operational_defaults() {
     has_controller_credentials "$file" && return 0
     secret="$(controller_secret)"
 
-    replace_top_level_key external-controller "external-controller: 127.0.0.1:9090" "$file"
+    replace_top_level_key external-controller "external-controller: 0.0.0.0:9090" "$file"
     replace_top_level_key secret "secret: \"$secret\"" "$file"
     replace_top_level_key external-ui "external-ui: ./ui" "$file"
     replace_top_level_key external-ui-url "external-ui-url: 'https://github.com/Zephyruso/zashboard/releases/latest/download/dist-no-fonts.zip'" "$file"
