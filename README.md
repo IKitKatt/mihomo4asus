@@ -155,7 +155,7 @@ The HWID is a SHA-256 hash from firmware version, router model, and a stable fir
 
 When a downloaded config is applied, the script preserves local operational settings required for `mihomo4asus`: `tproxy-port`, UI/controller keys, `dns.listen`, and the full `sniffer` section. During subscription import only, `tun`, `mixed-port`, LAN bind allow-list keys, DNS proxy outbounds, DNS rules, and unsupported fake-ip DNS options are removed from the downloaded config; `find-process-mode` is forced to `off`.
 
-If the Remnawave response already contains `proxy-providers`, placeholders such as `$subscription_url$`, `$x-hwid$`, `$x-device-os$`, `$x-ver-os$`, `$x-device-model$`, `$User-Agent$`, and `$profile-update-interval$` are rendered locally. If the response has no `proxy-providers`, the script generates a provider-based wrapper config and points it at the subscription URL with the same HWID headers.
+If the Remnawave response already contains `proxy-providers`, placeholders such as `$subscription_url$`, `$profile-title$`, `$x-hwid$`, `$x-device-os$`, `$x-ver-os$`, `$x-device-model$`, `$User-Agent$`, and `$profile-update-interval$` are rendered locally. If the response is a full Mihomo config without `proxy-providers`, the script keeps its DNS, proxy-groups, rule-providers, and rules, moves non-direct proxies to a local provider file under `/opt/root/mihomo/proxy_providers/`, and adds that provider to proxy groups. The provider name is taken from the `profile-title` response header; `base64:<value>` is decoded before use.
 
 For Smart core, generated/provider configs include:
 

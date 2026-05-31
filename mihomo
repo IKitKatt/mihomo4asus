@@ -54,6 +54,7 @@ SUBSCRIPTION_SETTINGS_FILE="$STATE_DIR/subscription.conf"
 SUBSCRIPTION_LAST_FILE="$STATE_DIR/subscription.last"
 SUBSCRIPTION_HWID_DATE_FILE="$STATE_DIR/hwid.date"
 SUBSCRIPTION_PROFILE_INTERVAL_FILE="$RUN_DIR/subscription.profile-update-interval"
+SUBSCRIPTION_PROFILE_TITLE_FILE="$RUN_DIR/subscription.profile-title"
 CORE_TYPE_FILE="$STATE_DIR/core.type"
 MODE_FILE="$RUN_DIR/mode"
 
@@ -497,6 +498,13 @@ yaml_double_quote_value() {
     printf '%s' "$1" | sed 's/\\/\\\\/g;s/"/\\"/g'
 }
 
+safe_filename_value() {
+    value="$1"
+    safe="$(printf '%s' "$value" | sed 's/[^A-Za-z0-9._-]/-/g;s/--*/-/g;s/^-//;s/-$//;s/^\(.\{1,48\}\).*/\1/')"
+    [ -n "$safe" ] || safe="subscription"
+    printf '%s\n' "$safe"
+}
+
 remove_block_keys() {
     block="$1"
     file="$2"
@@ -742,6 +750,340 @@ sanitize_subscription_config() {
     remove_dns_proxy_entries "$file" "$dns_proxy_names"
     remove_rules_for_names "$file" "$dns_proxy_names"
     rm -f "$dns_proxy_names"
+}
+
+extract_proxy_provider_payload() {
+    file="$1"
+    provider_file="$2"
+    names_file="$3"
+    tmp_payload="$provider_file.$$"
+
+    mkdir -p "$(dirname "$provider_file")" || return 1
+    : > "$names_file" || return 1
+
+    awk -v provider_file="$tmp_payload" -v names_file="$names_file" '
+        function indent_len(value, prefix) {
+            prefix=value
+            sub(/[^[:space:]].*$/, "", prefix)
+            return length(prefix)
+        }
+        function clean_value(value) {
+            sub(/[[:space:]]#.*$/, "", value)
+            gsub(/^[[:space:]"]+|[[:space:]"]+$/, "", value)
+            return value
+        }
+        function parse_item_line(line, value) {
+            value=line
+            sub(/^[[:space:]]+/, "", value)
+            if (value ~ /^-[[:space:]]*/) sub(/^-[[:space:]]*/, "", value)
+            if (value ~ /^name:[[:space:]]*/) {
+                sub(/^name:[[:space:]]*/, "", value)
+                item_name=clean_value(value)
+            } else if (value ~ /^type:[[:space:]]*/) {
+                sub(/^type:[[:space:]]*/, "", value)
+                item_type=clean_value(value)
+            }
+        }
+        function flush_item(i) {
+            if (item_count == 0) return
+            if (item_type != "direct" && item_type != "dns") {
+                for (i=1; i<=item_count; i++) print item_lines[i] >> provider_file
+                if (item_name != "") print item_name >> names_file
+                wrote=1
+            }
+            item_count=0
+            item_name=""
+            item_type=""
+        }
+        BEGIN {
+            print "proxies:" > provider_file
+        }
+        {
+            line=$0
+            is_top=(line ~ /^[^[:space:]#][^:]*:[[:space:]]*/)
+            if (is_top) {
+                if (in_proxies) flush_item()
+                if (line ~ /^proxies:[[:space:]]*($|#)/) {
+                    in_proxies=1
+                    item_indent=-1
+                    next
+                }
+                in_proxies=0
+            }
+            if (in_proxies) {
+                if (line ~ /^[[:space:]]*-[[:space:]]*/) {
+                    current_indent=indent_len(line)
+                    if (item_indent < 0 || current_indent == item_indent) {
+                        flush_item()
+                        item_indent=current_indent
+                    }
+                }
+                if (item_indent >= 0 && indent_len(line) >= item_indent) {
+                    item_count++
+                    item_lines[item_count]=line
+                    parse_item_line(line)
+                    next
+                }
+            }
+        }
+        END {
+            if (in_proxies) flush_item()
+            exit wrote ? 0 : 1
+        }
+    ' "$file" || {
+        rm -f "$tmp_payload"
+        return 1
+    }
+
+    mv "$tmp_payload" "$provider_file"
+}
+
+remove_provider_proxies_from_config() {
+    file="$1"
+    names_file="$2"
+    tmp="$file.rmproviderproxies.$$"
+
+    [ -s "$names_file" ] || return 0
+    awk -v names_file="$names_file" '
+        function indent_len(value, prefix) {
+            prefix=value
+            sub(/[^[:space:]].*$/, "", prefix)
+            return length(prefix)
+        }
+        function clean_value(value) {
+            sub(/[[:space:]]#.*$/, "", value)
+            gsub(/^[[:space:]"]+|[[:space:]"]+$/, "", value)
+            return value
+        }
+        function parse_item_line(line, value) {
+            value=line
+            sub(/^[[:space:]]+/, "", value)
+            if (value ~ /^-[[:space:]]*/) sub(/^-[[:space:]]*/, "", value)
+            if (value ~ /^name:[[:space:]]*/) {
+                sub(/^name:[[:space:]]*/, "", value)
+                item_name=clean_value(value)
+            }
+        }
+        function removed_name(name, i) {
+            for (i=1; i<=name_count; i++) if (names[i] == name) return 1
+            return 0
+        }
+        function flush_item(i) {
+            if (item_count == 0) return
+            if (!removed_name(item_name)) {
+                kept_count++
+                for (i=1; i<=item_count; i++) kept_lines[++kept_line_count]=item_lines[i]
+            }
+            item_count=0
+            item_name=""
+        }
+        function flush_proxies(i) {
+            if (in_proxies) flush_item()
+            if (kept_count > 0) {
+                print "proxies:"
+                for (i=1; i<=kept_line_count; i++) print kept_lines[i]
+            }
+            in_proxies=0
+            item_indent=-1
+            item_count=0
+            kept_count=0
+            kept_line_count=0
+        }
+        BEGIN {
+            while ((getline name < names_file) > 0) {
+                name_count++
+                names[name_count]=name
+            }
+            close(names_file)
+        }
+        {
+            line=$0
+            is_top=(line ~ /^[^[:space:]#][^:]*:[[:space:]]*/)
+            if (is_top) {
+                if (in_proxies) flush_proxies()
+                if (line ~ /^proxies:[[:space:]]*($|#)/) {
+                    in_proxies=1
+                    item_indent=-1
+                    next
+                }
+            }
+            if (in_proxies) {
+                if (line ~ /^[[:space:]]*-[[:space:]]*/) {
+                    current_indent=indent_len(line)
+                    if (item_indent < 0 || current_indent == item_indent) {
+                        flush_item()
+                        item_indent=current_indent
+                    }
+                }
+                if (item_indent >= 0 && indent_len(line) >= item_indent) {
+                    item_count++
+                    item_lines[item_count]=line
+                    parse_item_line(line)
+                    next
+                }
+                next
+            }
+            print
+        }
+        END {
+            if (in_proxies) flush_proxies()
+        }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+add_local_proxy_provider_block() {
+    file="$1"
+    provider_name="$2"
+    provider_path="$3"
+    block_file="$RUN_DIR/local-provider-block.$$"
+    provider_name_q="$(yaml_double_quote_value "$provider_name")"
+
+    {
+        printf '%s\n' "proxy-providers:"
+        printf '  "%s":\n' "$provider_name_q"
+        printf '%s\n' "    type: file"
+        printf '%s\n' "    path: $provider_path"
+        printf '%s\n' "    health-check:"
+        printf '%s\n' "      enable: true"
+        printf '%s\n' "      lazy: true"
+        printf '%s\n' "      interval: 600"
+        printf '%s\n' "      timeout: 5000"
+        printf '%s\n' "      url: https://www.gstatic.com/generate_204"
+    } > "$block_file" || return 1
+
+    replace_top_level_block proxy-providers "$block_file" "$file"
+    rm -f "$block_file"
+}
+
+add_provider_use_to_proxy_groups() {
+    file="$1"
+    provider_name="$2"
+    names_file="$3"
+    tmp="$file.provideruse.$$"
+    provider_name_q="$(yaml_double_quote_value "$provider_name")"
+
+    [ -s "$names_file" ] || return 0
+    awk -v names_file="$names_file" -v provider_name="$provider_name" -v provider_name_q="$provider_name_q" '
+        function indent_len(value, prefix) {
+            prefix=value
+            sub(/[^[:space:]].*$/, "", prefix)
+            return length(prefix)
+        }
+        function clean_list_value(line, value) {
+            value=line
+            sub(/^[[:space:]]*-[[:space:]]*/, "", value)
+            sub(/[[:space:]]#.*$/, "", value)
+            gsub(/^[[:space:]"]+|[[:space:]"]+$/, "", value)
+            return value
+        }
+        function removed_name(name, i) {
+            for (i=1; i<=name_count; i++) if (names[i] == name) return 1
+            return 0
+        }
+        function flush_group(i) {
+            if (group_count == 0) return
+            if (!has_use) {
+                group_lines[++group_count]="    use:"
+                group_lines[++group_count]="      - \"" provider_name_q "\""
+            } else if (!has_provider_use) {
+                for (i=1; i<=group_count; i++) {
+                    print group_lines[i]
+                    if (i == use_line_index) print "      - \"" provider_name_q "\""
+                }
+                group_count=0
+                return
+            }
+            for (i=1; i<=group_count; i++) print group_lines[i]
+            group_count=0
+        }
+        function store_group_line(line) {
+            group_lines[++group_count]=line
+        }
+        BEGIN {
+            while ((getline name < names_file) > 0) {
+                name_count++
+                names[name_count]=name
+            }
+            close(names_file)
+        }
+        /^proxy-groups:[[:space:]]*($|#)/ {
+            in_groups=1
+            print
+            next
+        }
+        in_groups && /^[^[:space:]#][^:]*:[[:space:]]*/ {
+            flush_group()
+            in_groups=0
+            in_proxies_list=0
+            in_use_list=0
+        }
+        in_groups && /^  -[[:space:]]*/ {
+            flush_group()
+            has_use=0
+            has_provider_use=0
+            use_line_index=0
+            in_proxies_list=0
+            in_use_list=0
+            store_group_line($0)
+            next
+        }
+        in_groups {
+            line=$0
+            current_indent=indent_len(line)
+            if (line ~ /^    proxies:[[:space:]]*($|#)/) {
+                in_proxies_list=1
+                in_use_list=0
+                store_group_line(line)
+                next
+            }
+            if (line ~ /^    use:[[:space:]]*($|#)/) {
+                has_use=1
+                use_line_index=group_count + 1
+                in_use_list=1
+                in_proxies_list=0
+                store_group_line(line)
+                next
+            }
+            if (current_indent <= 4 && line !~ /^[[:space:]]*$/) {
+                in_proxies_list=0
+                in_use_list=0
+            }
+            if (in_proxies_list && line ~ /^      -[[:space:]]*/) {
+                if (removed_name(clean_list_value(line))) next
+            }
+            if (in_use_list && line ~ /^      -[[:space:]]*/) {
+                if (clean_list_value(line) == provider_name) has_provider_use=1
+            }
+            store_group_line(line)
+            next
+        }
+        {
+            print
+        }
+        END {
+            if (in_groups) flush_group()
+        }
+    ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+convert_proxies_to_local_provider() {
+    file="$1"
+    provider_name="$2"
+    provider_slug="$(safe_filename_value "$provider_name")"
+    provider_dir="$MIHOMO_HOME/proxy_providers"
+    provider_file="$provider_dir/$provider_slug.yaml"
+    provider_path="./proxy_providers/$provider_slug.yaml"
+    names_file="$RUN_DIR/provider-proxy-names.$$"
+
+    extract_proxy_provider_payload "$file" "$provider_file" "$names_file" || {
+        rm -f "$names_file"
+        return 1
+    }
+    remove_provider_proxies_from_config "$file" "$names_file"
+    add_local_proxy_provider_block "$file" "$provider_name" "$provider_path"
+    add_provider_use_to_proxy_groups "$file" "$provider_name" "$names_file"
+    rm -f "$names_file"
+    log "local proxy-provider saved to $provider_file"
 }
 
 replace_profile_smart_collector() {
@@ -1206,6 +1548,7 @@ render_subscription_placeholders() {
     file="$1"
     url="$2"
     interval_seconds="$(provider_update_interval_seconds)"
+    provider_name="$(subscription_provider_name)"
     hwid="$(subscription_header_value hwid)"
     device_os="$(subscription_header_value device_os)"
     ver_os="$(subscription_header_value ver_os)"
@@ -1214,6 +1557,7 @@ render_subscription_placeholders() {
 
     replace_literal_in_file '$subscription_url$' "$url" "$file"
     replace_literal_in_file '$profile-update-interval$' "$interval_seconds" "$file"
+    replace_literal_in_file '$profile-title$' "$provider_name" "$file"
     replace_literal_in_file '$x-hwid$' "$hwid" "$file"
     replace_literal_in_file '$x-device-os$' "$device_os" "$file"
     replace_literal_in_file '$x-ver-os$' "$ver_os" "$file"
@@ -1292,6 +1636,8 @@ ensure_subscription_provider_headers() {
 generate_provider_subscription_config() {
     url="$1"
     file="$2"
+    provider_name="$(subscription_provider_name)"
+    provider_name_q="$(yaml_double_quote_value "$provider_name")"
     url_q="$(yaml_double_quote_value "$url")"
     interval_seconds="$(provider_update_interval_seconds)"
     hwid="$(yaml_double_quote_value "$(subscription_header_value hwid)")"
@@ -1344,7 +1690,7 @@ generate_provider_subscription_config() {
         printf '%s\n' "    - https://8.8.8.8/dns-query"
         printf '%s\n' ""
         printf '%s\n' "proxy-providers:"
-        printf '%s\n' "  subscription:"
+        printf '  "%s":\n' "$provider_name_q"
         printf '%s\n' "    type: http"
         printf '%s\n' "    url: \"$url_q\""
         printf '%s\n' "    path: ./proxy_providers/subscription.yaml"
@@ -1384,7 +1730,7 @@ generate_provider_subscription_config() {
         fi
         printf '%s\n' "      - DIRECT"
         printf '%s\n' "    use:"
-        printf '%s\n' "      - subscription"
+        printf '      - "%s"\n' "$provider_name_q"
         if [ "$(core_type)" = "smart" ]; then
             printf '%s\n' ""
             printf '%s\n' "  - name: SMART"
@@ -1393,7 +1739,7 @@ generate_provider_subscription_config() {
             printf '%s\n' "    collectdata: false"
             printf '%s\n' "    sample-rate: 1"
             printf '%s\n' "    use:"
-            printf '%s\n' "      - subscription"
+            printf '      - "%s"\n' "$provider_name_q"
         else
             printf '%s\n' ""
             printf '%s\n' "  - name: AUTO"
@@ -1403,7 +1749,7 @@ generate_provider_subscription_config() {
             printf '%s\n' "    tolerance: 100"
             printf '%s\n' "    lazy: true"
             printf '%s\n' "    use:"
-            printf '%s\n' "      - subscription"
+            printf '      - "%s"\n' "$provider_name_q"
         fi
         printf '%s\n' ""
         printf '%s\n' "rules:"
@@ -1450,6 +1796,67 @@ capture_subscription_profile_interval() {
     fi
 }
 
+decode_base64_text() {
+    value="$1"
+    value="${value#base64:}"
+    if command -v base64 >/dev/null 2>&1; then
+        printf '%s' "$value" | base64 -d 2>/dev/null && return 0
+    elif [ -x /opt/bin/base64 ]; then
+        printf '%s' "$value" | /opt/bin/base64 -d 2>/dev/null && return 0
+    elif command -v busybox >/dev/null 2>&1 && busybox base64 --help >/dev/null 2>&1; then
+        printf '%s' "$value" | busybox base64 -d 2>/dev/null && return 0
+    elif [ -x /bin/busybox ] && /bin/busybox base64 --help >/dev/null 2>&1; then
+        printf '%s' "$value" | /bin/busybox base64 -d 2>/dev/null && return 0
+    elif command -v openssl >/dev/null 2>&1; then
+        printf '%s' "$value" | openssl enc -base64 -d 2>/dev/null && return 0
+    elif [ -x /opt/bin/openssl ]; then
+        printf '%s' "$value" | /opt/bin/openssl enc -base64 -d 2>/dev/null && return 0
+    fi
+    return 1
+}
+
+subscription_profile_title() {
+    headers_file="$1"
+    [ -s "$headers_file" ] || return 1
+    raw_title="$(awk -F: '
+        tolower($1) == "profile-title" {
+            line=$0
+            sub(/^[^:]*:[[:space:]]*/, "", line)
+            sub(/\r$/, "", line)
+            print line
+            exit
+        }
+    ' "$headers_file")"
+    [ -n "$raw_title" ] || return 1
+    case "$raw_title" in
+        base64:*)
+            title="$(decode_base64_text "$raw_title" 2>/dev/null)"
+            [ -n "$title" ] && { printf '%s\n' "$title"; return 0; }
+            ;;
+    esac
+    printf '%s\n' "$raw_title"
+}
+
+capture_subscription_profile_title() {
+    headers_file="$1"
+    title="$(subscription_profile_title "$headers_file" 2>/dev/null)"
+    if [ -n "$title" ]; then
+        printf '%s\n' "$title" > "$SUBSCRIPTION_PROFILE_TITLE_FILE" 2>/dev/null
+    fi
+}
+
+capture_subscription_headers() {
+    headers_file="$1"
+    capture_subscription_profile_interval "$headers_file"
+    capture_subscription_profile_title "$headers_file"
+}
+
+subscription_provider_name() {
+    title="$(cat "$SUBSCRIPTION_PROFILE_TITLE_FILE" 2>/dev/null | sed 's/\r$//')"
+    [ -n "$title" ] || title="subscription"
+    printf '%s\n' "$title"
+}
+
 http_get_subscription_to_file() {
     url="$1"
     dst="$2"
@@ -1465,7 +1872,7 @@ http_get_subscription_to_file() {
     user_agent="$(printf '%s\n' "$headers" | sed -n '5p')"
     accept_header="Accept: application/json, text/plain, */*"
 
-    rm -f "$dst" "$err_file" "$hdr_file" "$SUBSCRIPTION_PROFILE_INTERVAL_FILE"
+    rm -f "$dst" "$err_file" "$hdr_file" "$SUBSCRIPTION_PROFILE_INTERVAL_FILE" "$SUBSCRIPTION_PROFILE_TITLE_FILE"
     log_subscription_network_info "$url"
 
     curl_bin="$(find_command_path curl 2>/dev/null)"
@@ -1483,7 +1890,7 @@ http_get_subscription_to_file() {
         -H "x-ver-os: $ver_os" \
         -H "x-device-model: $device_model" \
         -o "$dst" "$url" 2>"$err_file" && subscription_response_valid "$dst"; then
-        capture_subscription_profile_interval "$hdr_file"
+        capture_subscription_headers "$hdr_file"
         rm -f "$err_file" "$hdr_file"
         return 0
     fi
@@ -1509,7 +1916,7 @@ http_get_subscription_to_file() {
                 -H "x-device-model: $device_model" \
                 -o "$dst" "$url" 2>"$err_file" && subscription_response_valid "$dst"; then
                 log "subscription found on local address: $scan_target"
-                capture_subscription_profile_interval "$hdr_file"
+                capture_subscription_headers "$hdr_file"
                 rm -f "$err_file" "$hdr_file"
                 return 0
             fi
@@ -1785,23 +2192,28 @@ subscription_update_config() {
         return 3
     }
 
+    cp "$tmp_raw" "$tmp_merged" || {
+        rm -f "$tmp_raw" "$tmp_merged"
+        log "ERROR: cannot prepare subscription config"
+        return 3
+    }
+    sanitize_subscription_config "$tmp_merged"
+    provider_name="$(subscription_provider_name)"
     if has_top_level_block proxy-providers "$tmp_raw"; then
-        cp "$tmp_raw" "$tmp_merged" || {
-            rm -f "$tmp_raw" "$tmp_merged"
-            log "ERROR: cannot prepare subscription config"
-            return 3
-        }
         render_subscription_placeholders "$tmp_merged" "$subscription_url"
         ensure_subscription_provider_headers "$tmp_merged"
     else
-        log "subscription response has no proxy-providers; generating provider-based wrapper"
-        generate_provider_subscription_config "$subscription_url" "$tmp_merged" || {
-            rm -f "$tmp_raw" "$tmp_merged"
-            log "ERROR: cannot generate provider subscription config"
-            return 3
-        }
+        if has_top_level_block proxies "$tmp_merged" && convert_proxies_to_local_provider "$tmp_merged" "$provider_name"; then
+            log "subscription proxies moved to provider: $provider_name"
+        else
+            log "subscription response has no usable proxies block; generating provider-based wrapper"
+            generate_provider_subscription_config "$subscription_url" "$tmp_merged" || {
+                rm -f "$tmp_raw" "$tmp_merged"
+                log "ERROR: cannot generate provider subscription config"
+                return 3
+            }
+        fi
     fi
-    sanitize_subscription_config "$tmp_merged"
     preserve_operational_config "$CONFIG_FILE" "$tmp_merged"
     apply_smart_config_defaults "$tmp_merged"
     move_operational_keys_to_top "$tmp_merged"
