@@ -728,49 +728,190 @@ sanitize_subscription_config() {
     rm -f "$dns_proxy_names"
 }
 
-replace_profile_smart_collector() {
+extract_proxy_server_descriptions() {
     file="$1"
-    tmp="$file.profile.$$"
+    out_file="$2"
 
+    : > "$out_file" || return 1
+    [ -f "$file" ] || return 0
     awk '
-        /^profile:[[:space:]]*($|#)/ {
-            in_profile=1
-            saw_profile=1
-            print
-            next
+        function indent_len(value, prefix) {
+            prefix=value
+            sub(/[^[:space:]].*$/, "", prefix)
+            return length(prefix)
         }
-        in_profile && /^[^[:space:]#][^:]*:[[:space:]]*/ {
-            if (!done) print "  smart-collector-size: 100"
-            done=1
-            in_profile=0
+        function clean_value(value) {
+            sub(/[[:space:]]#.*$/, "", value)
+            gsub(/^[[:space:]"]+|[[:space:]"]+$/, "", value)
+            return value
         }
-        in_profile && /^[[:space:]]+smart-collector-size:[[:space:]]*/ {
-            if (!done) print "  smart-collector-size: 100"
-            done=1
-            next
-        }
-        { print }
-        END {
-            if (in_profile && !done) print "  smart-collector-size: 100"
-            if (!saw_profile) {
-                print ""
-                print "profile:"
-                print "  store-selected: true"
-                print "  store-fake-ip: true"
-                print "  smart-collector-size: 100"
+        function parse_item_line(line, value) {
+            value=line
+            sub(/^[[:space:]]+/, "", value)
+            if (value ~ /^-[[:space:]]*/) sub(/^-[[:space:]]*/, "", value)
+            if (value ~ /^name:[[:space:]]*/) {
+                sub(/^name:[[:space:]]*/, "", value)
+                item_name=clean_value(value)
+            } else if (value ~ /^serverDescription:[[:space:]]*/) {
+                sub(/^serverDescription:[[:space:]]*/, "", value)
+                item_description=value
             }
         }
-    ' "$file" > "$tmp" && mv "$tmp" "$file"
+        function flush_item() {
+            if (item_name != "" && item_description != "") {
+                print item_name "\t" item_description
+            }
+            item_name=""
+            item_description=""
+        }
+        {
+            line=$0
+            is_top=(line ~ /^[^[:space:]#][^:]*:[[:space:]]*/)
+            if (is_top) {
+                if (in_proxies) flush_item()
+                if (line ~ /^proxies:[[:space:]]*($|#)/) {
+                    in_proxies=1
+                    item_indent=-1
+                    next
+                }
+                in_proxies=0
+            }
+            if (in_proxies) {
+                if (line ~ /^[[:space:]]*-[[:space:]]*/) {
+                    current_indent=indent_len(line)
+                    if (item_indent < 0 || current_indent == item_indent) {
+                        flush_item()
+                        item_indent=current_indent
+                    }
+                }
+                if (item_indent >= 0 && indent_len(line) >= item_indent) {
+                    parse_item_line(line)
+                }
+            }
+        }
+        END {
+            if (in_proxies) flush_item()
+        }
+    ' "$file" > "$out_file"
 }
 
-apply_smart_config_defaults() {
-    file="$1"
-    [ "$(core_type)" = "smart" ] || return 0
+preserve_proxy_server_descriptions() {
+    base_file="$1"
+    target_file="$2"
+    descriptions_file="$RUN_DIR/proxy-server-descriptions.$$"
+    tmp="$target_file.descriptions.$$"
 
-    replace_top_level_key lgbm-auto-update "lgbm-auto-update: true" "$file"
-    replace_top_level_key lgbm-update-interval "lgbm-update-interval: 72" "$file"
-    replace_top_level_key lgbm-url "lgbm-url: \"https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin\"" "$file"
-    replace_profile_smart_collector "$file"
+    extract_proxy_server_descriptions "$base_file" "$descriptions_file" || {
+        rm -f "$descriptions_file"
+        return 0
+    }
+    [ -s "$descriptions_file" ] || {
+        rm -f "$descriptions_file"
+        return 0
+    }
+
+    awk -v descriptions_file="$descriptions_file" '
+        function indent_len(value, prefix) {
+            prefix=value
+            sub(/[^[:space:]].*$/, "", prefix)
+            return length(prefix)
+        }
+        function clean_value(value) {
+            sub(/[[:space:]]#.*$/, "", value)
+            gsub(/^[[:space:]"]+|[[:space:]"]+$/, "", value)
+            return value
+        }
+        function parse_item_line(line, value) {
+            value=line
+            sub(/^[[:space:]]+/, "", value)
+            if (value ~ /^-[[:space:]]*/) sub(/^-[[:space:]]*/, "", value)
+            if (value ~ /^name:[[:space:]]*/) {
+                sub(/^name:[[:space:]]*/, "", value)
+                item_name=clean_value(value)
+            } else if (value ~ /^serverDescription:[[:space:]]*/) {
+                item_has_description=1
+            }
+        }
+        function flush_item(i, spaces, desc) {
+            if (item_count == 0) return
+            for (i=1; i<=item_count; i++) print item_lines[i]
+            desc=descriptions[item_name]
+            if (!item_has_description && item_name != "" && desc != "") {
+                spaces=sprintf("%*s", item_indent + 2, "")
+                print spaces "serverDescription: " desc
+            }
+            item_count=0
+            item_name=""
+            item_has_description=0
+        }
+        BEGIN {
+            FS="\t"
+            while ((getline line < descriptions_file) > 0) {
+                split(line, parts, "\t")
+                if (parts[1] != "" && parts[2] != "") descriptions[parts[1]]=parts[2]
+            }
+            close(descriptions_file)
+        }
+        {
+            line=$0
+            is_top=(line ~ /^[^[:space:]#][^:]*:[[:space:]]*/)
+            if (is_top) {
+                if (in_proxies) flush_item()
+                if (line ~ /^proxies:[[:space:]]*($|#)/) {
+                    in_proxies=1
+                    item_indent=-1
+                    print
+                    next
+                }
+                in_proxies=0
+            }
+            if (in_proxies) {
+                if (line ~ /^[[:space:]]*-[[:space:]]*/) {
+                    current_indent=indent_len(line)
+                    if (item_indent < 0 || current_indent == item_indent) {
+                        flush_item()
+                        item_indent=current_indent
+                    }
+                }
+                if (item_indent >= 0 && indent_len(line) >= item_indent) {
+                    item_lines[++item_count]=line
+                    parse_item_line(line)
+                    next
+                }
+            }
+            print
+        }
+        END {
+            if (in_proxies) flush_item()
+        }
+    ' "$target_file" > "$tmp" && mv "$tmp" "$target_file"
+    rm -f "$descriptions_file"
+}
+
+print_proxy_server_descriptions() {
+    file="$1"
+    descriptions_file="$RUN_DIR/proxy-server-descriptions.$$"
+    count=0
+
+    extract_proxy_server_descriptions "$file" "$descriptions_file" || {
+        rm -f "$descriptions_file"
+        return 0
+    }
+    [ -s "$descriptions_file" ] || {
+        rm -f "$descriptions_file"
+        return 0
+    }
+
+    print_message "INFO" "proxy server descriptions:"
+    while IFS='	' read -r name description; do
+        [ -n "$name" ] || continue
+        count=$((count + 1))
+        [ "$count" -le 10 ] && print_message "INFO" "  $name: $description"
+    done < "$descriptions_file"
+    if [ "$count" -gt 10 ]; then
+        print_message "INFO" "  ... and $((count - 10)) more"
+    fi
+    rm -f "$descriptions_file"
 }
 
 controller_secret() {
@@ -1631,7 +1772,7 @@ subscription_update_config() {
     }
     sanitize_subscription_config "$tmp_merged"
     preserve_operational_config "$CONFIG_FILE" "$tmp_merged"
-    apply_smart_config_defaults "$tmp_merged"
+    preserve_proxy_server_descriptions "$SUB_CONFIG_FILE" "$tmp_merged"
     apply_enabled_operational_defaults "$tmp_merged"
     move_operational_keys_to_top "$tmp_merged"
     detect_tproxy_port "$tmp_merged" >/dev/null || {
@@ -2034,7 +2175,6 @@ start_mihomo() {
     cfg="$(config_file)" || die "missing active config"
     [ -x "$MIHOMO_BIN" ] || die "missing executable $MIHOMO_BIN"
 
-    apply_smart_config_defaults "$cfg"
     apply_enabled_operational_defaults "$cfg"
     move_operational_keys_to_top "$cfg"
     detect_tproxy_port "$cfg" >/dev/null || die "config $cfg must contain numeric tproxy-port, for example: tproxy-port: 7894"
@@ -2097,6 +2237,7 @@ install_mihomo() {
     install_routing_setup
     CONTROLLER_UI_SETUP_PENDING=0
     install_controller_ui_setup
+    install_start_setup
 }
 
 install_core_setup() {
@@ -2145,7 +2286,6 @@ install_config_setup() {
                 save_subscription_settings local "" "$(subscription_update_hours)"
                 stop_subscription_updater
                 if [ -f "$CONFIG_FILE" ]; then
-                    apply_smart_config_defaults "$CONFIG_FILE"
                     apply_enabled_operational_defaults "$CONFIG_FILE"
                     move_operational_keys_to_top "$CONFIG_FILE"
                 fi
@@ -2162,6 +2302,7 @@ install_config_setup() {
                 save_subscription_settings url "$url" "$(subscription_update_hours)"
                 if subscription_update_config; then
                     log "subscription config saved to $SUB_CONFIG_FILE"
+                    print_proxy_server_descriptions "$SUB_CONFIG_FILE"
                     log "config is ready; run: mihomo start"
                     return 0
                 fi
@@ -2239,6 +2380,30 @@ install_controller_ui_setup() {
             n|N|no|NO|No)
                 rm -f "$CONTROLLER_UI_ENABLED_FILE" 2>/dev/null
                 print_message "INFO" "controller and zashboard setup skipped"
+                return 0
+                ;;
+            *)
+                print_message "WARN" "answer yes or no"
+                ;;
+        esac
+    done
+}
+
+install_start_setup() {
+    [ "$(subscription_type)" = "url" ] || return 0
+    [ -f "$SUB_CONFIG_FILE" ] || return 0
+
+    while :; do
+        printf '\nStart Mihomo core now? [y/N]: '
+        read choice
+        [ -n "$choice" ] || choice=n
+        case "$choice" in
+            y|Y|yes|YES|Yes)
+                start_mihomo
+                return 0
+                ;;
+            n|N|no|NO|No)
+                print_message "INFO" "Mihomo start skipped"
                 return 0
                 ;;
             *)
