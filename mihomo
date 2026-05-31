@@ -793,14 +793,62 @@ controller_secret() {
     printf '%s\n' "$secret"
 }
 
+has_controller_credentials() {
+    file="$1"
+    has_top_level_key external-controller "$file" && has_top_level_key secret "$file"
+}
+
 apply_operational_defaults() {
     file="$1"
+    has_controller_credentials "$file" && return 0
     secret="$(controller_secret)"
 
     replace_top_level_key external-controller "external-controller: 127.0.0.1:9090" "$file"
     replace_top_level_key secret "secret: \"$secret\"" "$file"
     replace_top_level_key external-ui "external-ui: ./ui" "$file"
     replace_top_level_key external-ui-url "external-ui-url: 'https://github.com/Zephyruso/zashboard/releases/latest/download/dist-no-fonts.zip'" "$file"
+}
+
+dashboard_url_from_config() {
+    file="$1"
+    controller="$(yaml_value external-controller "$file")"
+    [ -n "$controller" ] || return 1
+
+    case "$controller" in
+        http://*|https://*)
+            base="$controller"
+            ;;
+        *://*)
+            return 1
+            ;;
+        *:*)
+            host="${controller%:*}"
+            port="${controller##*:}"
+            case "$host" in
+                ""|0.0.0.0|::|"[::]")
+                    host="$(first_lan_ip)"
+                    [ -n "$host" ] || host="127.0.0.1"
+                    ;;
+            esac
+            base="http://$host:$port"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    printf '%s/ui/\n' "${base%/}"
+}
+
+print_dashboard_access() {
+    file="$1"
+    has_controller_credentials "$file" || return 0
+
+    dashboard_url="$(dashboard_url_from_config "$file")"
+    dashboard_secret="$(yaml_value secret "$file")"
+
+    [ -n "$dashboard_url" ] && print_message "INFO" "Dashboard: $dashboard_url"
+    [ -n "$dashboard_secret" ] && print_message "INFO" "Dashboard password: $dashboard_secret"
 }
 
 controller_ui_enabled() {
@@ -900,14 +948,16 @@ preserve_operational_config() {
         line="$(top_level_line tproxy-port "$base_file")"
         [ -n "$line" ] && replace_top_level_key tproxy-port "$line" "$target_file"
 
-        for key in external-controller external-controller-cors external-controller-unix external-controller-tls secret external-ui external-ui-name external-ui-url; do
-            line="$(top_level_line "$key" "$base_file")"
-            if [ -n "$line" ]; then
-                replace_top_level_key "$key" "$line" "$target_file"
-            else
-                remove_top_level_key "$key" "$target_file"
-            fi
-        done
+        if ! has_controller_credentials "$target_file"; then
+            for key in external-controller external-controller-cors external-controller-unix external-controller-tls secret external-ui external-ui-name external-ui-url; do
+                line="$(top_level_line "$key" "$base_file")"
+                if [ -n "$line" ]; then
+                    replace_top_level_key "$key" "$line" "$target_file"
+                else
+                    remove_top_level_key "$key" "$target_file"
+                fi
+            done
+        fi
 
         if has_top_level_block sniffer "$base_file"; then
             extract_top_level_block sniffer "$base_file" > "$tmp_block"
@@ -1995,6 +2045,7 @@ start_mihomo() {
     install_hooks
     start_subscription_updater
     log "mihomo started in tproxy mode"
+    print_dashboard_access "$cfg"
 }
 
 stop_mihomo() {
@@ -2170,6 +2221,7 @@ install_controller_ui_setup() {
                     apply_operational_defaults "$cfg"
                     move_operational_keys_to_top "$cfg"
                     print_message "SUCCESS" "controller and zashboard settings applied to $cfg"
+                    print_dashboard_access "$cfg"
                 else
                     print_message "INFO" "controller and zashboard settings will be applied when config exists"
                 fi
