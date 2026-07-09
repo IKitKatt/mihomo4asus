@@ -24,6 +24,7 @@ desktop.ini
 # Logs
 *.log
 logs/
+src/examples
 src/frontend/app/node_modules/
 src/frontend/app/tsconfig.tsbuildinfo
 src/frontend/app/node_modules/.vite-temp/
