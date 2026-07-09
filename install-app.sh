@@ -5,7 +5,7 @@
 #   sh install-app.sh
 #   RAW_BASE=https://raw.githubusercontent.com/<user>/<repo>/<branch> sh install-app.sh
 
-RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/IKitKatt/mihomo4asus/main}"
+RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/IKitKatt/mihomo4asus/web}"
 ADDON_DIR="${ADDON_DIR:-/jffs/addons/mihomo}"
 MIHOMO_HOME="${MIHOMO_HOME:-/opt/root/mihomo}"
 SCRIPT_PATH="${SCRIPT_PATH:-$ADDON_DIR/mihomo}"

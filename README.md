@@ -28,7 +28,7 @@ Minimal **Mihomo** TProxy runner for **ASUSWRT-Merlin** routers with **Entware**
 Copy this single command to the router SSH console:
 
 ```sh
-wget -q -O /tmp/mihomo4asus-install.sh https://raw.githubusercontent.com/IKitKatt/mihomo4asus/main/install-app.sh && sh /tmp/mihomo4asus-install.sh
+wget -q -O /tmp/mihomo4asus-install.sh https://raw.githubusercontent.com/IKitKatt/mihomo4asus/web/install-app.sh && sh /tmp/mihomo4asus-install.sh
 ```
 
 The full installer copies the CLI, backend modules, Merlin addon page, Vue web frontend and CGI backend to `/jffs/addons/mihomo`, installs `lighttpd` through Entware `/opt` when needed, starts the web service on port `5581`, and mounts a `Mihomo` tab at the end of the Merlin VPN menu when Addons API is available.

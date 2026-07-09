@@ -13,7 +13,7 @@ PID_FILE="${PID_FILE:-$RUN_DIR/mihomo-web.pid}"
 PAGE_FILE="$STATE_DIR/webui.page"
 SS_SCRIPT="${SS_SCRIPT:-/jffs/scripts/services-start}"
 TAG="mihomo-web"
-RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/IKitKatt/mihomo4asus/main}"
+RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/IKitKatt/mihomo4asus/web}"
 
 log() {
     printf '%s\n' "$1" | logger -t mihomo-web
