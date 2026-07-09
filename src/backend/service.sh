@@ -19,6 +19,8 @@ start_mihomo() {
     sleep 3
     if ! is_running; then
         stop_log_guard
+        echo "Last Mihomo log lines:" >&2
+        tail -n 30 "$LOG_FILE" >&2
         die "mihomo failed to start; check $LOG_FILE"
     fi
 

@@ -51,12 +51,17 @@ remove_tagged_lines "$SS_SCRIPT" "$WEB_TAG"
 
 if [ -f "$ADDON_DIR/state/webui.page" ]; then
     page="$(cat "$ADDON_DIR/state/webui.page" 2>/dev/null)"
-    [ -n "$page" ] && rm -f "/www/user/$page"
+    [ -n "$page" ] && rm -f "/www/user/$page" "/www/user/${page%.asp}.title"
 fi
 if [ -f "$MIHOMO_HOME/state/webui.page" ]; then
     page="$(cat "$MIHOMO_HOME/state/webui.page" 2>/dev/null)"
-    [ -n "$page" ] && rm -f "/www/user/$page"
+    [ -n "$page" ] && rm -f "/www/user/$page" "/www/user/${page%.asp}.title"
 fi
+for page in /www/user/user*.asp; do
+    [ -f "$page" ] || continue
+    grep -q 'page:mihomo' "$page" || continue
+    rm -f "$page" "${page%.asp}.title"
+done
 
 if [ -f /tmp/menuTree.js ]; then
     sed -i '/tabName: "Mihomo"/d' /tmp/menuTree.js

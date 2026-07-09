@@ -42,12 +42,25 @@ opkg_bin() {
 }
 
 ensure_lighttpd() {
-    lighttpd_bin >/dev/null 2>&1 && return 0
     opkg_path="$(opkg_bin)" || die "Entware opkg is required to install lighttpd"
-    log "Installing Entware lighttpd package"
+    need_lighttpd=0
+    need_cgi=0
+    lighttpd_bin >/dev/null 2>&1 || need_lighttpd=1
+    [ -f /opt/lib/lighttpd/mod_cgi.so ] || need_cgi=1
+
+    [ "$need_lighttpd" -eq 0 ] && [ "$need_cgi" -eq 0 ] && return 0
+
     "$opkg_path" update || die "Entware package index update failed"
-    "$opkg_path" install lighttpd || die "Entware could not install lighttpd"
+    if [ "$need_lighttpd" -eq 1 ]; then
+        log "Installing Entware lighttpd package"
+        "$opkg_path" install lighttpd || die "Entware could not install lighttpd"
+    fi
+    if [ "$need_cgi" -eq 1 ]; then
+        log "Installing Entware lighttpd CGI module"
+        "$opkg_path" install lighttpd-mod-cgi || die "Entware could not install the lighttpd CGI module"
+    fi
     lighttpd_bin >/dev/null 2>&1 || die "lighttpd is required after package installation"
+    [ -f /opt/lib/lighttpd/mod_cgi.so ] || die "lighttpd CGI module is required after package installation"
 }
 
 download_to_file() {
@@ -75,6 +88,8 @@ is_running() {
 
 start_service() {
     ensure_dirs
+    # Merlin page registration is independent of the Entware HTTP service.
+    mount_webui
     is_running && { log "mihomo web is already running on port $WEB_PORT"; return 0; }
     export PATH="/opt/bin:/opt/sbin:$PATH"
     ensure_lighttpd
@@ -85,7 +100,6 @@ start_service() {
     sleep 1
     is_running || die "mihomo web failed to start"
     install_hook
-    mount_webui
     log "mihomo web started on port $WEB_PORT"
 }
 
@@ -115,46 +129,63 @@ mount_webui() {
     . /usr/sbin/helper.sh
     nvram get rc_support 2>/dev/null | grep -q am_addons || return 0
     [ -f "$ADDON_DIR/Mihomo.asp" ] || return 0
-    saved_page="$(cat "$PAGE_FILE" 2>/dev/null)"
-    if [ -n "$saved_page" ]; then
-        cp "$ADDON_DIR/Mihomo.asp" "/www/user/$saved_page" 2>/dev/null && am_webui_page="$saved_page"
-    fi
-    if [ -z "${am_webui_page:-}" ]; then
-        am_get_webui_page "$ADDON_DIR/Mihomo.asp"
-    fi
+
+    find_webui_page
     [ "$am_webui_page" != "none" ] || die "cannot allocate Merlin webui page"
-    cp "$ADDON_DIR/Mihomo.asp" "/www/user/$am_webui_page" || die "cannot mount webui page"
+    ln -s -f "$ADDON_DIR/Mihomo.asp" "/www/user/$am_webui_page" || die "cannot mount webui page"
+    echo "mihomo" > "/www/user/${am_webui_page%.asp}.title" || die "cannot create Merlin page title"
     echo "$am_webui_page" > "$PAGE_FILE"
 
     if [ ! -f /tmp/menuTree.js ]; then
-        cp /www/require/modules/menuTree.js /tmp/menuTree.js
-        mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js
+        cp /www/require/modules/menuTree.js /tmp/menuTree.js || die "cannot copy Merlin menu"
+        mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js || die "cannot mount Merlin menu"
     fi
+
     tmp_menu="/tmp/menuTree.mihomo.$$"
-    entry="{url: \"$am_webui_page\", tabName: \"Mihomo\"},"
-    awk -v entry="$entry" '
-        /tabName: "Mihomo"/ { next }
-        {
-            lines[++n] = $0
-            if ($0 ~ /url:[[:space:]]*"/ && $0 ~ /(VPN|OpenVPN|WireGuard|IPSec)/) {
-                last_vpn = n
-            }
-        }
-        END {
-            for (i = 1; i <= n; i++) {
-                print lines[i]
-                if (i == last_vpn) print entry
-            }
-            if (!last_vpn) print entry
-        }
-    ' /tmp/menuTree.js > "$tmp_menu" && mv "$tmp_menu" /tmp/menuTree.js
+    grep -v 'tabName: "Mihomo"' /tmp/menuTree.js > "$tmp_menu" || die "cannot clean Merlin menu"
+    mv "$tmp_menu" /tmp/menuTree.js || die "cannot update Merlin menu"
+    sed '/index: "menu_VPN"/,/index:/ {
+        /url:[[:space:]]*"NULL",[[:space:]]*tabName:[[:space:]]*"__INHERIT__"/ i \
+    { url: "'"$am_webui_page"'", tabName: "Mihomo" },
+    }' /tmp/menuTree.js > "$tmp_menu" || die "cannot add Mihomo VPN tab"
+    mv "$tmp_menu" /tmp/menuTree.js || die "cannot update Merlin VPN menu"
     umount /www/require/modules/menuTree.js 2>/dev/null
-    mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js
+    mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js || die "cannot remount Merlin menu"
+}
+
+find_webui_page() {
+    am_webui_page="none"
+    used_pages=""
+
+    for page in /www/user/user*.asp; do
+        [ -f "$page" ] || continue
+        if grep -q 'page:mihomo' "$page"; then
+            am_webui_page="${page##*/}"
+            return 0
+        fi
+        page_number="${page##*/user}"
+        page_number="${page_number%.asp}"
+        case "$page_number" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        used_pages="$used_pages $page_number"
+    done
+
+    page_number=1
+    while [ "$page_number" -le 20 ]; do
+        echo "$used_pages" | grep -qw "$page_number" || {
+            am_webui_page="user$page_number.asp"
+            return 0
+        }
+        page_number=$((page_number + 1))
+    done
 }
 
 unmount_webui() {
-    page="$(cat "$PAGE_FILE" 2>/dev/null)"
-    [ -n "$page" ] && rm -f "/www/user/$page"
+    find_webui_page
+    page="$am_webui_page"
+    [ -n "$page" ] && [ "$page" != "none" ] && rm -f "/www/user/$page"
+    [ -n "$page" ] && [ "$page" != "none" ] && rm -f "/www/user/${page%.asp}.title"
     rm -f "$PAGE_FILE"
     if [ -f /tmp/menuTree.js ]; then
         sed -i '/tabName: "Mihomo"/d' /tmp/menuTree.js

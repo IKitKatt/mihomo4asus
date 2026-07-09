@@ -37,7 +37,26 @@ The installer creates the required folders, installs the entrypoint and backend 
 
 ### Local install without GitHub Raw
 
-If `raw.githubusercontent.com` is unavailable, copy the complete project tree, including `install-app.sh` and `src/`, to `/jffs/addons/mihomo`, then run:
+If `raw.githubusercontent.com` is unavailable, copy this minimal local-install set to `/jffs/addons/mihomo`, then run:
+
+```text
+install-app.sh
+install.sh                       optional local bootstrapper
+uninstall-app.sh                 needed only for full removal
+src/cli/mihomo
+src/backend/*.sh
+src/frontend/mihomo-web
+src/frontend/server.conf
+src/frontend/Mihomo.asp
+src/frontend/www/index.html
+src/frontend/www/app.css
+src/frontend/www/app.js
+src/frontend/www/cgi-bin/api
+```
+
+Do not copy `src/frontend/app/` (including `node_modules`), `src/examples/`, `docs/`, `.git/`, or development files. The router needs only the already-built frontend in `src/frontend/www`; Node.js, TypeScript, Vite, and Vue source files are not used at runtime.
+
+Then run:
 
 ```sh
 sh /jffs/addons/mihomo/install-app.sh

@@ -109,11 +109,13 @@ ensure_entware() {
     [ -n "$opkg_bin" ] || die "Entware opkg is not available. Install Entware first."
 
     need_lighttpd=0
+    need_lighttpd_cgi=0
     need_curl=0
     command -v lighttpd >/dev/null 2>&1 || [ -x /opt/sbin/lighttpd ] || [ -x /opt/bin/lighttpd ] || need_lighttpd=1
+    [ -f /opt/lib/lighttpd/mod_cgi.so ] || need_lighttpd_cgi=1
     [ -x /opt/bin/curl ] || [ -x /opt/sbin/curl ] || need_curl=1
 
-    if [ "$need_lighttpd" -eq 1 ] || [ "$need_curl" -eq 1 ]; then
+    if [ "$need_lighttpd" -eq 1 ] || [ "$need_lighttpd_cgi" -eq 1 ] || [ "$need_curl" -eq 1 ]; then
         "$opkg_bin" update || die "Entware package index update failed"
     fi
     if [ "$need_curl" -eq 1 ]; then
@@ -124,8 +126,13 @@ ensure_entware() {
         echo "Installing Entware lighttpd package"
         "$opkg_bin" install lighttpd || die "Entware could not install lighttpd"
     fi
+    if [ "$need_lighttpd_cgi" -eq 1 ]; then
+        echo "Installing Entware lighttpd CGI module"
+        "$opkg_bin" install lighttpd-mod-cgi || die "Entware could not install the lighttpd CGI module"
+    fi
     [ -x /opt/bin/curl ] || [ -x /opt/sbin/curl ] || die "Entware curl is required after package installation"
     command -v lighttpd >/dev/null 2>&1 || [ -x /opt/sbin/lighttpd ] || [ -x /opt/bin/lighttpd ] || die "lighttpd is required"
+    [ -f /opt/lib/lighttpd/mod_cgi.so ] || die "Entware lighttpd CGI module is required"
 }
 
 create_default_config() {
@@ -234,7 +241,13 @@ install_alias
 install_hooks
 
 if [ ! -x "$MIHOMO_HOME/mihomo" ]; then
-    "$SCRIPT_PATH" update core || echo "WARN: core download failed; install can be retried with: mihomo update core"
+    if ! "$SCRIPT_PATH" update core; then
+        if [ -x "$MIHOMO_HOME/mihomo" ]; then
+            echo "WARN: core was installed but did not start; check $LOG_FILE"
+        else
+            echo "WARN: core download failed; install can be retried with: mihomo update core"
+        fi
+    fi
 fi
 "$ADDON_DIR/webui/mihomo-web" start
 
