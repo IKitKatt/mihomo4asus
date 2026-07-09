@@ -33,6 +33,23 @@ lighttpd_bin() {
     return 1
 }
 
+opkg_bin() {
+    for path in /opt/bin/opkg /opt/sbin/opkg; do
+        [ -x "$path" ] && { printf '%s\n' "$path"; return 0; }
+    done
+    command -v opkg 2>/dev/null && return 0
+    return 1
+}
+
+ensure_lighttpd() {
+    lighttpd_bin >/dev/null 2>&1 && return 0
+    opkg_path="$(opkg_bin)" || die "Entware opkg is required to install lighttpd"
+    log "Installing Entware lighttpd package"
+    "$opkg_path" update || die "Entware package index update failed"
+    "$opkg_path" install lighttpd || die "Entware could not install lighttpd"
+    lighttpd_bin >/dev/null 2>&1 || die "lighttpd is required after package installation"
+}
+
 download_to_file() {
     url="$1"
     dst="$2"
@@ -56,6 +73,8 @@ is_running() {
 start_service() {
     ensure_dirs
     is_running && { log "mihomo web is already running on port $WEB_PORT"; return 0; }
+    export PATH="/opt/bin:/opt/sbin:$PATH"
+    ensure_lighttpd
     lighttpd_bin="$(lighttpd_bin)" || die "lighttpd is required; install it with Entware opkg"
     [ -f "$WEB_ROOT/index.html" ] || die "missing $WEB_ROOT/index.html"
     [ -f "$WEB_CONF" ] || die "missing $WEB_CONF"

@@ -60,9 +60,21 @@ remove_tagged_lines() {
 
 ensure_entware() {
     [ -d /opt ] || die "Entware /opt is not mounted. Install Entware first."
-    if ! command -v lighttpd >/dev/null 2>&1 && [ ! -x /opt/sbin/lighttpd ] && [ ! -x /opt/bin/lighttpd ] && command -v opkg >/dev/null 2>&1; then
+
+    export PATH="/opt/bin:/opt/sbin:$PATH"
+    if [ -x /opt/bin/opkg ]; then
+        opkg_bin=/opt/bin/opkg
+    elif [ -x /opt/sbin/opkg ]; then
+        opkg_bin=/opt/sbin/opkg
+    else
+        opkg_bin="$(command -v opkg 2>/dev/null)"
+    fi
+    [ -n "$opkg_bin" ] || die "Entware opkg is not available. Install Entware first."
+
+    if ! command -v lighttpd >/dev/null 2>&1 && [ ! -x /opt/sbin/lighttpd ] && [ ! -x /opt/bin/lighttpd ]; then
         echo "Installing Entware lighttpd package"
-        opkg update && opkg install lighttpd
+        "$opkg_bin" update || die "Entware package index update failed"
+        "$opkg_bin" install lighttpd || die "Entware could not install lighttpd"
     fi
     command -v lighttpd >/dev/null 2>&1 || [ -x /opt/sbin/lighttpd ] || [ -x /opt/bin/lighttpd ] || die "lighttpd is required"
 }
