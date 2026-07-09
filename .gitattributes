@@ -4,5 +4,6 @@ install.sh text eol=lf
 install-app.sh text eol=lf
 uninstall-app.sh text eol=lf
 src/cli/mihomo text eol=lf
+src/frontend/Mihomo.asp text eol=lf
 src/frontend/mihomo-web text eol=lf
 src/frontend/www/cgi-bin/api text eol=lf

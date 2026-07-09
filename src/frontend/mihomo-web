@@ -140,6 +140,8 @@ mount_webui() {
     mkdir -p "$MERLIN_ASSET_DIR" || die "cannot create Merlin asset directory"
     ln -s -f "$WEB_ROOT/app.js" "$MERLIN_ASSET_DIR/app.js" || die "cannot publish Mihomo application script"
     ln -s -f "$WEB_ROOT/app.css" "$MERLIN_ASSET_DIR/app.css" || die "cannot publish Mihomo application stylesheet"
+    [ -s "$MERLIN_ASSET_DIR/app.js" ] || die "Mihomo application script is missing"
+    [ -s "$MERLIN_ASSET_DIR/app.css" ] || die "Mihomo application stylesheet is missing"
 
     if [ ! -f /tmp/menuTree.js ]; then
         cp /www/require/modules/menuTree.js /tmp/menuTree.js || die "cannot copy Merlin menu"
