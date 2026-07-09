@@ -576,9 +576,33 @@ remove_rules_for_names() {
 }
 
 cleanup_hooks() {
-    [ -f "$NAT_SCRIPT" ] && sed -i "/$TAG/d" "$NAT_SCRIPT"
-    [ -f "$FW_SCRIPT" ] && sed -i "/$TAG/d" "$FW_SCRIPT"
-    [ -f "$SS_SCRIPT" ] && sed -i "/$TAG/d" "$SS_SCRIPT"
+    remove_hook_tag "$NAT_SCRIPT" "$TAG"
+    remove_hook_tag "$FW_SCRIPT" "$TAG"
+    remove_hook_tag "$SS_SCRIPT" "$TAG"
+}
+
+remove_hook_tag() {
+    file="$1"
+    tag="$2"
+    [ -f "$file" ] || return 0
+
+    tmp="/tmp/mihomo-hook.$$"
+    grep -Fv "$tag" "$file" > "$tmp"
+    status=$?
+    [ "$status" -le 1 ] || {
+        rm -f "$tmp"
+        log "cannot read hook file: $file"
+        return 1
+    }
+
+    # /jffs/scripts can disallow creating sed's adjacent temporary file.
+    # Rewriting the existing file only requires write access to that file.
+    if ! cat "$tmp" > "$file"; then
+        rm -f "$tmp"
+        log "cannot update hook file: $file"
+        return 1
+    fi
+    rm -f "$tmp"
 }
 
 append_hook_line() {

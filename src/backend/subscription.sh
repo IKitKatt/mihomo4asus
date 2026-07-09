@@ -739,9 +739,11 @@ subscription_update_config() {
 subscription_update_if_needed() {
     [ "$(subscription_type)" = "url" ] || return 0
     [ -n "$(subscription_setting url)" ] || return 0
-    [ -f "$SUB_CONFIG_FILE" ] || { subscription_update_config; return 0; }
-    subscription_is_due || return 0
-    subscription_update_config || log "subscription update skipped; keeping current config"
+    [ -s "$SUB_CONFIG_FILE" ] || { subscription_update_config; return 0; }
+
+    # Starting the core must not wait for a scheduled remote update. The
+    # background updater handles the next due refresh after the core is up.
+    subscription_is_due && log "subscription update is due; keeping current config until scheduled refresh"
     return 0
 }
 

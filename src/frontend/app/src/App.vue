@@ -51,6 +51,8 @@ const messages = {
     excludeHint: 'Выбранные IP будут обходить Mihomo.',
     devices: 'Устройства',
     selected: 'выбрано',
+    select: 'Выбор',
+    client: 'Устройство (MAC)',
     ipAddress: 'IP адрес',
     hostname: 'Имя',
     macAddress: 'MAC',
@@ -120,6 +122,8 @@ const messages = {
     excludeHint: 'Selected IP addresses will bypass Mihomo.',
     devices: 'Devices',
     selected: 'selected',
+    select: 'Select',
+    client: 'Client (MAC)',
     ipAddress: 'IP address',
     hostname: 'Name',
     macAddress: 'MAC',
@@ -250,7 +254,7 @@ function validIpOrCidr(value: string) {
 }
 
 function showToast(text: string, error = false) {
-  toast.text = text
+  toast.text = text.replace(/^\[(SUCCESS|INFO)\]\s*/gim, '').trim()
   toast.error = error
   toast.visible = true
   window.clearTimeout(toastTimer)
@@ -363,9 +367,11 @@ async function doApplyMode() {
 
 async function doSaveSubscription() {
   await withBusy('subscription', async () => {
-    const result = await saveSubscriptionUrl(form.subscriptionUrl.trim(), Number(form.subscriptionHours) || 1)
+    await saveSubscriptionUrl(form.subscriptionUrl.trim(), Number(form.subscriptionHours) || 1)
+    const result = await runAction('update-subscription')
     showToast(result.output || t('subscriptionSaved'))
     await refreshStatus()
+    await loadConfig()
   })
 }
 
@@ -552,14 +558,14 @@ onMounted(async () => {
           <table class="device-table">
             <thead>
               <tr>
-                <th></th>
-                <th>{{ t('hostname') }}</th>
+                <th>{{ t('select') }}</th>
+                <th>{{ t('client') }}</th>
                 <th>{{ t('ipAddress') }}</th>
-                <th>{{ t('macAddress') }}</th>
+                <th>{{ t('selected') }}</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="device in deviceRows" :key="device.ip">
+              <tr v-for="device in deviceRows" :key="device.ip" :class="{ selected: isSelected(device.ip) }">
                 <td>
                   <input
                     :checked="isSelected(device.ip)"
@@ -567,9 +573,17 @@ onMounted(async () => {
                     @change="onDeviceChange(device.ip, $event)"
                   />
                 </td>
-                <td>{{ device.name || '-' }}</td>
+                <td>
+                  <div class="device-client">
+                    <span class="device-avatar">{{ (device.name || device.ip).slice(0, 1).toUpperCase() }}</span>
+                    <span>
+                      <strong>{{ device.name || 'Manual device' }}</strong>
+                      <small>{{ device.mac || '-' }}</small>
+                    </span>
+                  </div>
+                </td>
                 <td><code>{{ device.ip }}</code></td>
-                <td>{{ device.mac || '-' }}</td>
+                <td>{{ isSelected(device.ip) ? t('selected') : '-' }}</td>
               </tr>
               <tr v-if="deviceRows.length === 0">
                 <td colspan="4" class="empty-cell">{{ t('noDevices') }}</td>
@@ -597,14 +611,16 @@ onMounted(async () => {
           <span>{{ t('updateInterval') }}</span>
           <input v-model.number="form.subscriptionHours" type="number" min="1" />
         </label>
-        <label class="switch-control wide">
-          <input v-model="form.hwidEnabled" :disabled="Boolean(busy)" type="checkbox" @change="doSaveHwidSupport" />
-          <span>{{ t('hwidSupport') }}</span>
-        </label>
-        <label class="switch-control wide">
-          <input v-model="form.scanLocal" :disabled="Boolean(busy)" type="checkbox" @change="doSaveScanLocal" />
-          <span>{{ t('lanFallback') }}</span>
-        </label>
+        <div class="subscription-options">
+          <label class="switch-control">
+            <input v-model="form.hwidEnabled" :disabled="Boolean(busy)" type="checkbox" @change="doSaveHwidSupport" />
+            <span>{{ t('hwidSupport') }}</span>
+          </label>
+          <label class="switch-control">
+            <input v-model="form.scanLocal" :disabled="Boolean(busy)" type="checkbox" @change="doSaveScanLocal" />
+            <span>{{ t('lanFallback') }}</span>
+          </label>
+        </div>
         <div class="inline-actions">
           <button :disabled="Boolean(busy)" @click="doSaveSubscription">{{ t('saveUrl') }}</button>
           <button :disabled="Boolean(busy)" @click="doUseLocal">{{ t('useLocal') }}</button>
@@ -623,7 +639,7 @@ onMounted(async () => {
       </section>
     </div>
 
-    <section v-if="activePage === 'config'" class="panel">
+    <section v-if="activePage === 'config'" class="panel config-panel">
       <div class="panel-head stackable">
         <h2>{{ t('config') }}</h2>
         <div class="inline-actions">
@@ -648,6 +664,6 @@ onMounted(async () => {
       <pre>{{ recentLog }}</pre>
     </section>
 
-    <div v-if="toast.visible" class="toast" :class="{ error: toast.error }">{{ toast.text }}</div>
+    <div v-if="toast.visible" class="toast" :class="{ error: toast.error, success: !toast.error }">{{ toast.text }}</div>
   </main>
 </template>

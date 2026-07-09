@@ -7,6 +7,8 @@ WEB_ROOT="${WEB_ROOT:-$ADDON_DIR/webui/www}"
 WEB_CONF="${WEB_CONF:-$ADDON_DIR/webui/server.conf}"
 WEB_PORT="${MIHOMO_WEB_PORT:-5581}"
 MERLIN_ASSET_DIR="${MERLIN_ASSET_DIR:-/www/user/mihomo}"
+PUBLIC_PAGE_NAME="MihomoAPP.asp"
+PUBLIC_PAGE_PATH="/www/$PUBLIC_PAGE_NAME"
 MIHOMO_HOME="${MIHOMO_HOME:-/opt/root/mihomo}"
 RUN_DIR="${RUN_DIR:-$MIHOMO_HOME/run}"
 STATE_DIR="${STATE_DIR:-$MIHOMO_HOME/state}"
@@ -121,7 +123,13 @@ install_hook() {
 }
 
 remove_hook() {
-    [ -f "$SS_SCRIPT" ] && sed -i "/$TAG/d" "$SS_SCRIPT"
+    [ -f "$SS_SCRIPT" ] || return 0
+    tmp="/tmp/mihomo-web-hook.$$"
+    grep -Fv "$TAG" "$SS_SCRIPT" > "$tmp"
+    status=$?
+    [ "$status" -le 1 ] || { rm -f "$tmp"; return 1; }
+    cat "$tmp" > "$SS_SCRIPT" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
 }
 
 mount_webui() {
@@ -143,6 +151,13 @@ mount_webui() {
     [ -s "$MERLIN_ASSET_DIR/app.js" ] || die "Mihomo application script is missing"
     [ -s "$MERLIN_ASSET_DIR/app.css" ] || die "Mihomo application stylesheet is missing"
 
+    menu_page="$am_webui_page"
+    if publish_public_page; then
+        menu_page="$PUBLIC_PAGE_NAME"
+    else
+        log "Merlin root web directory is read-only; using $am_webui_page"
+    fi
+
     if [ ! -f /tmp/menuTree.js ]; then
         cp /www/require/modules/menuTree.js /tmp/menuTree.js || die "cannot copy Merlin menu"
         mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js || die "cannot mount Merlin menu"
@@ -153,11 +168,21 @@ mount_webui() {
     mv "$tmp_menu" /tmp/menuTree.js || die "cannot update Merlin menu"
     sed '/index: "menu_VPN"/,/index:/ {
         /url:[[:space:]]*"NULL",[[:space:]]*tabName:[[:space:]]*"__INHERIT__"/ i \
-    { url: "'"$am_webui_page"'", tabName: "Mihomo" },
+    { url: "'"$menu_page"'", tabName: "Mihomo" },
     }' /tmp/menuTree.js > "$tmp_menu" || die "cannot add Mihomo VPN tab"
     mv "$tmp_menu" /tmp/menuTree.js || die "cannot update Merlin VPN menu"
     umount /www/require/modules/menuTree.js 2>/dev/null
     mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js || die "cannot remount Merlin menu"
+}
+
+publish_public_page() {
+    if [ -e "$PUBLIC_PAGE_PATH" ] || [ -L "$PUBLIC_PAGE_PATH" ]; then
+        [ -L "$PUBLIC_PAGE_PATH" ] && [ "$(readlink "$PUBLIC_PAGE_PATH" 2>/dev/null)" = "$ADDON_DIR/Mihomo.asp" ]
+        return
+    fi
+
+    ln -s "$ADDON_DIR/Mihomo.asp" "$PUBLIC_PAGE_PATH" 2>/dev/null || return 1
+    [ -L "$PUBLIC_PAGE_PATH" ] && [ "$(readlink "$PUBLIC_PAGE_PATH" 2>/dev/null)" = "$ADDON_DIR/Mihomo.asp" ]
 }
 
 find_webui_page() {
@@ -194,6 +219,9 @@ unmount_webui() {
     [ -n "$page" ] && [ "$page" != "none" ] && rm -f "/www/user/$page"
     [ -n "$page" ] && [ "$page" != "none" ] && rm -f "/www/user/${page%.asp}.title"
     rm -rf "$MERLIN_ASSET_DIR"
+    if [ -L "$PUBLIC_PAGE_PATH" ] && [ "$(readlink "$PUBLIC_PAGE_PATH" 2>/dev/null)" = "$ADDON_DIR/Mihomo.asp" ]; then
+        rm -f "$PUBLIC_PAGE_PATH"
+    fi
     rm -f "$PAGE_FILE"
     if [ -f /tmp/menuTree.js ]; then
         sed -i '/tabName: "Mihomo"/d' /tmp/menuTree.js

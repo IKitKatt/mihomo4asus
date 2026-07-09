@@ -74,7 +74,6 @@ reload_mihomo_config() {
 }
 
 stop_mihomo() {
-    cleanup_hooks
     flush_rules
     stop_log_guard
     stop_subscription_updater

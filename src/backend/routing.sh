@@ -254,6 +254,12 @@ apply_rules() {
         return 0
     fi
 
+    if ! is_running; then
+        flush_rules
+        log "routing rules skipped: mihomo core is stopped"
+        return 0
+    fi
+
     cfg="$(config_file)" || die "missing active config"
     tproxy_port="$(detect_tproxy_port "$cfg")" || die "config $cfg must contain numeric tproxy-port, for example: tproxy-port: 7894"
     dns_port="$(detect_dns_port "$cfg")"

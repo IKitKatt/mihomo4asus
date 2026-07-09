@@ -20,7 +20,7 @@ let updatingFromParent = false
 
 const theme = EditorView.theme({
   '&': {
-    minHeight: '520px',
+    height: '100%',
     fontSize: '12px',
     borderRadius: '6px'
   },
@@ -29,7 +29,7 @@ const theme = EditorView.theme({
     lineHeight: '1.45'
   },
   '.cm-content': {
-    minHeight: '520px'
+    minHeight: '100%'
   },
   '.cm-gutters': {
     borderRadius: '6px 0 0 6px'

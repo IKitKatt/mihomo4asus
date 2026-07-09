@@ -18,7 +18,12 @@ remove_tagged_lines() {
     file="$1"
     tag="$2"
     [ -f "$file" ] || return 0
-    sed -i "/$tag/d" "$file"
+    tmp="/tmp/mihomo-uninstall-hook.$$"
+    grep -Fv "$tag" "$file" > "$tmp"
+    status=$?
+    [ "$status" -le 1 ] || { rm -f "$tmp"; return 1; }
+    cat "$tmp" > "$file" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
 }
 
 stop_by_pidfile() {
@@ -70,6 +75,9 @@ if [ -f /tmp/menuTree.js ]; then
 fi
 
 rm -rf /www/user/mihomo
+if [ -L /www/MihomoAPP.asp ] && [ "$(readlink /www/MihomoAPP.asp 2>/dev/null)" = "$ADDON_DIR/Mihomo.asp" ]; then
+    rm -f /www/MihomoAPP.asp
+fi
 
 rm -rf "$ADDON_DIR" "$MIHOMO_HOME"
 rm -f "$LN_PATH" /opt/bin/mihomo

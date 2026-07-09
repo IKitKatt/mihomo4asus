@@ -8,6 +8,7 @@ declare global {
 }
 
 const apiOrigin = window.MIHOMO_API_ORIGIN?.replace(/\/$/, '') || ''
+const requestTimeoutMs = 45_000
 
 const endpoint = (op: string, params: Record<string, string | number | boolean> = {}) => {
   const query = new URLSearchParams({ op })
@@ -29,30 +30,45 @@ async function parseJson<T>(response: Response): Promise<T> {
   return data as T
 }
 
+async function request(url: string, init: RequestInit = {}, timeoutMs = requestTimeoutMs): Promise<Response> {
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...init, signal: controller.signal })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('Request timed out')
+    }
+    throw error
+  } finally {
+    window.clearTimeout(timeout)
+  }
+}
+
 export async function getStatus(): Promise<StatusResponse> {
-  const response = await fetch(endpoint('status'))
+  const response = await request(endpoint('status'))
   return parseJson<StatusResponse>(response)
 }
 
 export async function getConfig(): Promise<string> {
-  const response = await fetch(endpoint('config'))
+  const response = await request(endpoint('config'))
   if (!response.ok) throw new Error(await response.text())
   return response.text()
 }
 
 export async function getLog(): Promise<string> {
-  const response = await fetch(endpoint('log'))
+  const response = await request(endpoint('log'))
   if (!response.ok) throw new Error(await response.text())
   return response.text()
 }
 
 export async function runAction(name: string): Promise<CommandResponse> {
-  const response = await fetch(endpoint('action', { name }), { method: 'POST' })
+  const response = await request(endpoint('action', { name }), { method: 'POST' })
   return parseJson<CommandResponse>(response)
 }
 
 export async function saveConfig(config: string): Promise<CommandResponse> {
-  const response = await fetch(endpoint('save-config'), {
+  const response = await request(endpoint('save-config'), {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     body: config
@@ -61,12 +77,12 @@ export async function saveConfig(config: string): Promise<CommandResponse> {
 }
 
 export async function saveMode(value: string): Promise<CommandResponse> {
-  const response = await fetch(endpoint('mode', { value }), { method: 'POST' })
+  const response = await request(endpoint('mode', { value }), { method: 'POST' })
   return parseJson<CommandResponse>(response)
 }
 
 export async function saveRouting(mode: RoutingMode, items: string): Promise<CommandResponse> {
-  const response = await fetch(endpoint('routing', { mode }), {
+  const response = await request(endpoint('routing', { mode }), {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     body: items
@@ -75,7 +91,7 @@ export async function saveRouting(mode: RoutingMode, items: string): Promise<Com
 }
 
 export async function saveSubscriptionUrl(url: string, hours: number): Promise<CommandResponse> {
-  const response = await fetch(endpoint('subscription', { type: 'url', hours }), {
+  const response = await request(endpoint('subscription', { type: 'url', hours }), {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     body: url
@@ -84,12 +100,12 @@ export async function saveSubscriptionUrl(url: string, hours: number): Promise<C
 }
 
 export async function useLocalSubscription(): Promise<CommandResponse> {
-  const response = await fetch(endpoint('subscription', { type: 'local' }), { method: 'POST' })
+  const response = await request(endpoint('subscription', { type: 'local' }), { method: 'POST' })
   return parseJson<CommandResponse>(response)
 }
 
 export async function saveSubscriptionMeta(field: 'hwidEnabled' | 'scanLocal', value: string): Promise<CommandResponse> {
-  const response = await fetch(endpoint('subscription-meta', { field }), {
+  const response = await request(endpoint('subscription-meta', { field }), {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain; charset=utf-8' },
     body: value

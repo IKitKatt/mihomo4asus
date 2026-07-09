@@ -106,7 +106,12 @@ remove_tagged_lines() {
     file="$1"
     tag="$2"
     [ -f "$file" ] || return 0
-    sed -i "/$tag/d" "$file"
+    tmp="/tmp/mihomo-install-hook.$$"
+    grep -Fv "$tag" "$file" > "$tmp"
+    status=$?
+    [ "$status" -le 1 ] || { rm -f "$tmp"; return 1; }
+    cat "$tmp" > "$file" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp"
 }
 
 ensure_entware() {
