@@ -31,7 +31,7 @@ Copy this single command to the router SSH console:
 wget -q -O /tmp/mihomo4asus-install.sh https://raw.githubusercontent.com/IKitKatt/mihomo4asus/web/install-app.sh && sh /tmp/mihomo4asus-install.sh
 ```
 
-The full installer copies the CLI, backend modules, Merlin addon page, Vue web frontend and CGI backend to `/jffs/addons/mihomo`, installs `lighttpd` through Entware `/opt` when needed, starts the web service on port `5581`, and mounts a `Mihomo` tab at the end of the Merlin VPN menu when Addons API is available.
+The full installer copies the CLI, backend modules, Merlin addon page, Vue web frontend and CGI backend to `/jffs/addons/mihomo`, installs `curl` and `lighttpd` through Entware `/opt` when needed, starts the web service on port `5581`, and mounts a `Mihomo` tab at the end of the Merlin VPN menu when Addons API is available.
 
 The installer creates the required folders, installs the entrypoint and backend modules to `/jffs/addons/mihomo`, creates the `mihomo` command in `/opt/bin/mihomo`, downloads the correct Mihomo core for the router architecture, and installs the core to `/opt/root/mihomo/mihomo`.
 

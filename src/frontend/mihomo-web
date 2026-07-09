@@ -53,6 +53,9 @@ ensure_lighttpd() {
 download_to_file() {
     url="$1"
     dst="$2"
+    if [ -x /opt/bin/curl ] && /opt/bin/curl -fL --retry 2 --retry-delay 1 --connect-timeout 10 --max-time 120 -o "$dst" "$url"; then
+        return 0
+    fi
     wget -q -O "$dst" "$url" 2>/dev/null || \
         curl -fsSL -o "$dst" "$url" 2>/dev/null
 }

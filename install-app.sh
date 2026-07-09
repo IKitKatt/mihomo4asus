@@ -28,8 +28,26 @@ die() {
 download_to_file() {
     url="$1"
     dst="$2"
-    wget -q -O "$dst" "$url" 2>/dev/null || \
-        curl -fsSL -o "$dst" "$url" 2>/dev/null
+    curl_path="$(curl_bin 2>/dev/null)"
+    if [ -n "$curl_path" ] && "$curl_path" -fL --retry 2 --retry-delay 1 --connect-timeout 10 --max-time 120 -o "$dst" "$url"; then
+        return 0
+    fi
+    wget_path="$(wget_bin 2>/dev/null)"
+    [ -n "$wget_path" ] && "$wget_path" -q -O "$dst" "$url"
+}
+
+curl_bin() {
+    for path in /opt/bin/curl /opt/sbin/curl; do
+        [ -x "$path" ] && { printf '%s\n' "$path"; return 0; }
+    done
+    command -v curl 2>/dev/null
+}
+
+wget_bin() {
+    for path in /opt/bin/wget /opt/sbin/wget; do
+        [ -x "$path" ] && { printf '%s\n' "$path"; return 0; }
+    done
+    command -v wget 2>/dev/null
 }
 
 copy_or_download() {
@@ -71,11 +89,23 @@ ensure_entware() {
     fi
     [ -n "$opkg_bin" ] || die "Entware opkg is not available. Install Entware first."
 
-    if ! command -v lighttpd >/dev/null 2>&1 && [ ! -x /opt/sbin/lighttpd ] && [ ! -x /opt/bin/lighttpd ]; then
-        echo "Installing Entware lighttpd package"
+    need_lighttpd=0
+    need_curl=0
+    command -v lighttpd >/dev/null 2>&1 || [ -x /opt/sbin/lighttpd ] || [ -x /opt/bin/lighttpd ] || need_lighttpd=1
+    [ -x /opt/bin/curl ] || [ -x /opt/sbin/curl ] || need_curl=1
+
+    if [ "$need_lighttpd" -eq 1 ] || [ "$need_curl" -eq 1 ]; then
         "$opkg_bin" update || die "Entware package index update failed"
+    fi
+    if [ "$need_curl" -eq 1 ]; then
+        echo "Installing Entware curl package"
+        "$opkg_bin" install curl || die "Entware could not install curl"
+    fi
+    if [ "$need_lighttpd" -eq 1 ]; then
+        echo "Installing Entware lighttpd package"
         "$opkg_bin" install lighttpd || die "Entware could not install lighttpd"
     fi
+    [ -x /opt/bin/curl ] || [ -x /opt/sbin/curl ] || die "Entware curl is required after package installation"
     command -v lighttpd >/dev/null 2>&1 || [ -x /opt/sbin/lighttpd ] || [ -x /opt/bin/lighttpd ] || die "lighttpd is required"
 }
 
