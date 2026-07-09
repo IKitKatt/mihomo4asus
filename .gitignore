@@ -35,6 +35,7 @@ old/*
 
 # Project-local files
 config.yaml
+config-smart.yaml
 install.sh
 include.list
 
