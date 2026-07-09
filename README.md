@@ -35,6 +35,16 @@ The full installer copies the CLI, backend modules, Merlin addon page, Vue web f
 
 The installer creates the required folders, installs the entrypoint and backend modules to `/jffs/addons/mihomo`, creates the `mihomo` command in `/opt/bin/mihomo`, downloads the correct Mihomo core for the router architecture, and installs the core to `/opt/root/mihomo/mihomo`.
 
+### Local install without GitHub Raw
+
+If `raw.githubusercontent.com` is unavailable, copy the complete project tree, including `install-app.sh` and `src/`, to `/jffs/addons/mihomo`, then run:
+
+```sh
+cd /jffs/addons/mihomo && sh install-app.sh
+```
+
+The installer detects local source files and does not download the application backend or frontend from GitHub. Entware package repositories and the Mihomo release download must still be reachable.
+
 During first install, choose the config method:
 
 - `Local config`: put your Mihomo YAML into `/opt/root/mihomo/config/config.yaml`.

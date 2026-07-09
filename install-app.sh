@@ -55,6 +55,11 @@ copy_or_download() {
     dst="$2"
     mkdir -p "$(dirname "$dst")" || die "cannot create $(dirname "$dst")"
     if [ -f "$src" ]; then
+        src_dir="$(CDPATH= cd -- "$(dirname -- "$src")" 2>/dev/null && pwd)" || die "cannot resolve source directory for $src"
+        dst_dir="$(CDPATH= cd -- "$(dirname -- "$dst")" 2>/dev/null && pwd)" || die "cannot resolve destination directory for $dst"
+        if [ "$src_dir/$(basename -- "$src")" = "$dst_dir/$(basename -- "$dst")" ]; then
+            return 0
+        fi
         cp "$src" "$dst" || die "cannot copy $src"
     else
         download_to_file "$RAW_BASE/$src" "$dst" || die "cannot download $RAW_BASE/$src"
