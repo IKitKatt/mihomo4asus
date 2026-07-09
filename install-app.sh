@@ -29,6 +29,18 @@ INSTALLER_DIR="$(CDPATH= cd "$(dirname "$0")" 2>/dev/null && pwd)" || die "canno
 LOCAL_SOURCE_DIR="${LOCAL_SOURCE_DIR:-$INSTALLER_DIR}"
 LOCAL_SOURCES_NOTICE=0
 
+normalize_lf() {
+    file="$1"
+    [ -f "$file" ] || return 0
+    sed -i 's/\r$//' "$file" || die "cannot normalize line endings in $file"
+}
+
+normalize_local_installers() {
+    for file in "$INSTALLER_DIR/install-app.sh" "$INSTALLER_DIR/install.sh" "$INSTALLER_DIR/uninstall-app.sh"; do
+        normalize_lf "$file"
+    done
+}
+
 download_to_file() {
     url="$1"
     dst="$2"
@@ -69,12 +81,14 @@ copy_or_download() {
         local_src="$src"
     fi
     if [ -f "$local_src" ]; then
+        normalize_lf "$local_src"
         src_dir="$(CDPATH= cd "$(dirname "$local_src")" 2>/dev/null && pwd)" || die "cannot resolve source directory for $local_src"
         dst_dir="$(CDPATH= cd "$(dirname "$dst")" 2>/dev/null && pwd)" || die "cannot resolve destination directory for $dst"
         if [ "$src_dir/$(basename "$local_src")" = "$dst_dir/$(basename "$dst")" ]; then
             return 0
         fi
         cp "$local_src" "$dst" || die "cannot copy $local_src"
+        normalize_lf "$dst"
     else
         download_to_file "$RAW_BASE/$src" "$dst" || die "cannot download $RAW_BASE/$src"
     fi
@@ -231,8 +245,13 @@ install_files() {
     chmod 644 "$ADDON_DIR"/src/backend/*.sh
     chmod 644 "$ADDON_DIR/webui/server.conf"
     chmod 644 "$ADDON_DIR/Mihomo.asp" "$ADDON_DIR/webui/Mihomo.asp" "$ADDON_DIR/webui/www/index.html" "$ADDON_DIR/webui/www/app.css" "$ADDON_DIR/webui/www/app.js"
+
+    for file in "$SCRIPT_PATH" "$ADDON_DIR/webui/mihomo-web" "$ADDON_DIR/webui/www/cgi-bin/api"; do
+        [ -s "$file" ] || die "missing installed runtime file: $file"
+    done
 }
 
+normalize_local_installers
 ensure_entware
 install_files
 create_default_config
