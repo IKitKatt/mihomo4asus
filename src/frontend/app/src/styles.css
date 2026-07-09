@@ -40,7 +40,7 @@
 #app h2 { font-size: 15px; }
 
 #app .shell {
-  width: min(1280px, calc(100% - 24px));
+  width: 100%;
   margin: 0 auto;
   padding: 14px 0 22px;
 }

@@ -77,6 +77,8 @@ const messages = {
     refreshLog: 'Обновить лог',
     emptyLog: 'Лог пуст.',
     done: 'Готово',
+    actionQueued: 'Команда передана роутеру',
+    subscriptionPending: 'Импорт подписки не завершился. Проверьте Log.',
     configSaved: 'Конфиг сохранён',
     modeApplied: 'Режим применён',
     subscriptionSaved: 'Подписка сохранена',
@@ -148,6 +150,8 @@ const messages = {
     refreshLog: 'Refresh log',
     emptyLog: 'Log is empty.',
     done: 'Done',
+    actionQueued: 'Command sent to the router',
+    subscriptionPending: 'Subscription import did not finish. Check Log.',
     configSaved: 'Config saved',
     modeApplied: 'Mode applied',
     subscriptionSaved: 'Subscription saved',
@@ -164,6 +168,7 @@ const messages = {
 type Page = 'main' | 'config' | 'logs'
 
 const routeParams = new URLSearchParams(window.location.search)
+const currentPage = window.location.pathname.slice(1)
 const routerLang = window.MIHOMO_ROUTER_LANGUAGE || routeParams.get('lang') || ''
 const locale: keyof typeof messages = /^en/i.test(routerLang) ? 'en' : 'ru'
 const t = (key: keyof typeof messages.en) => messages[locale][key]
@@ -322,11 +327,29 @@ async function refreshLog() {
   logText.value = await getLog()
 }
 
+const delay = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds))
+
+async function waitForStatus(predicate: (next: StatusResponse) => boolean, attempts = 12) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    await delay(1000)
+    await refreshStatus()
+    if (status.value && predicate(status.value)) return true
+  }
+  return false
+}
+
 async function doAction(action: string) {
   await withBusy(action, async () => {
     const result = await runAction(action)
-    showToast(result.output || t('done'))
-    await refreshStatus()
+    if (action === 'start') {
+      await waitForStatus((next) => next.running)
+    } else if (action === 'stop') {
+      await waitForStatus((next) => !next.running)
+    } else {
+      await delay(700)
+      await refreshStatus()
+    }
+    showToast(result.output || t('actionQueued'))
     if (action !== 'stop') await refreshLog().catch(() => undefined)
   })
 }
@@ -359,19 +382,25 @@ async function doSaveConfigAndAction(action: 'reload-config' | 'restart-core') {
 
 async function doApplyMode() {
   await withBusy('mode', async () => {
-    const result = await saveMode(form.proxyMode)
-    showToast(result.output || t('modeApplied'))
+    await saveMode(form.proxyMode)
+    await runAction('mode-apply')
+    await delay(700)
     await refreshStatus()
+    showToast(t('modeApplied'))
   })
 }
 
 async function doSaveSubscription() {
   await withBusy('subscription', async () => {
     await saveSubscriptionUrl(form.subscriptionUrl.trim(), Number(form.subscriptionHours) || 1)
-    const result = await runAction('update-subscription')
-    showToast(result.output || t('subscriptionSaved'))
-    await refreshStatus()
+    await runAction('update-subscription')
+    const imported = await waitForStatus((next) => next.activeConfig === next.subscriptionConfig, 35)
+    if (!imported) {
+      showToast(t('subscriptionPending'), true)
+      return
+    }
     await loadConfig()
+    showToast(t('subscriptionSaved'))
   })
 }
 
@@ -442,9 +471,11 @@ function addManualIp() {
 
 async function doSaveRouting() {
   await withBusy('routing', async () => {
-    const result = await saveRouting(form.routingMode, selectedIps.value.join('\n'))
-    showToast(result.output || t('routingUpdated'))
+    await saveRouting(form.routingMode, selectedIps.value.join('\n'))
+    await runAction('routing-apply')
+    await delay(700)
     await refreshStatus()
+    showToast(t('routingUpdated'))
   })
 }
 
@@ -461,6 +492,8 @@ function openDashboard() {
 }
 
 onMounted(async () => {
+  const merlinWindow = window as Window & { show_menu?: () => void }
+  merlinWindow.show_menu?.()
   await withBusy('init', async () => {
     await refreshStatus()
     await loadConfig()
@@ -470,6 +503,35 @@ onMounted(async () => {
 </script>
 
 <template>
+  <div id="TopBanner"></div>
+  <div id="Loading" class="popup_bg"></div>
+  <form id="ruleForm" method="post" action="/start_apply.htm" target="hidden_frame" @submit.prevent>
+    <input type="hidden" name="current_page" :value="currentPage" />
+    <input type="hidden" name="next_page" :value="currentPage" />
+    <input type="hidden" name="group_id" value="" />
+    <input type="hidden" name="modified" value="0" />
+    <input type="hidden" name="action_mode" value="apply" />
+    <input type="hidden" name="action_wait" value="5" />
+    <input type="hidden" name="action_script" value="" />
+    <table class="content" align="center" cellpadding="0" cellspacing="0">
+      <tbody>
+        <tr>
+          <td width="17">&nbsp;</td>
+          <td valign="top" width="202">
+            <div id="mainMenu"></div>
+            <div id="subMenu"></div>
+          </td>
+          <td valign="top">
+            <div id="tabMenu" class="submenuBlock"></div>
+            <table width="98%" border="0" align="left" cellpadding="0" cellspacing="0">
+              <tbody>
+                <tr>
+                  <td valign="top">
+                    <table id="FormTitle" class="FormTitle" width="760" border="0" cellpadding="4" cellspacing="0">
+                      <tbody>
+                        <tr bgcolor="#4D595D">
+                          <td valign="top">
+                            <div id="formfontdesc" class="formfontdesc">
   <main class="shell">
     <header class="topbar">
       <div class="brand">
@@ -666,4 +728,19 @@ onMounted(async () => {
 
     <div v-if="toast.visible" class="toast" :class="{ error: toast.error, success: !toast.error }">{{ toast.text }}</div>
   </main>
+                            </div>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </form>
+  <div id="footer"></div>
 </template>

@@ -17,6 +17,7 @@ LOG_FILE="${LOG_FILE:-$MIHOMO_HOME/mihomo.log}"
 SS_SCRIPT="${SS_SCRIPT:-/jffs/scripts/services-start}"
 NAT_SCRIPT="${NAT_SCRIPT:-/jffs/scripts/nat-start}"
 FW_SCRIPT="${FW_SCRIPT:-/jffs/scripts/firewall-start}"
+SE_SCRIPT="${SE_SCRIPT:-/jffs/scripts/service-event}"
 TAG="mihomo-script"
 WEB_TAG="mihomo-web"
 
@@ -169,7 +170,7 @@ external-ui-name: metacubexd
 
 dns:
   enable: true
-  listen: 0.0.0.0:1053
+  listen: 0.0.0.0:7874
   enhanced-mode: redir-host
   nameserver:
     - 1.1.1.1
@@ -188,6 +189,20 @@ proxy-groups:
 rules:
   - MATCH,DIRECT
 EOF
+}
+
+migrate_local_dns_port() {
+    file="$CONFIG_DIR/config.yaml"
+    [ -s "$file" ] || return 0
+    tmp="$RUN_DIR/config-dns-port.$$"
+    awk '
+        /^dns:[[:space:]]*($|#)/ { in_dns=1 }
+        in_dns && /^[^[:space:]#][^:]*:[[:space:]]*/ && $0 !~ /^dns:/ { in_dns=0 }
+        in_dns && /^[[:space:]]+listen:[[:space:]]*/ { sub(/:1053/, ":7874") }
+        { print }
+    ' "$file" > "$tmp" || { rm -f "$tmp"; return 1; }
+    cmp -s "$file" "$tmp" || mv "$tmp" "$file"
+    rm -f "$tmp"
 }
 
 create_state_files() {
@@ -225,9 +240,11 @@ install_hooks() {
     remove_tagged_lines "$SS_SCRIPT" "$TAG"
     remove_tagged_lines "$NAT_SCRIPT" "$TAG"
     remove_tagged_lines "$FW_SCRIPT" "$TAG"
+    remove_tagged_lines "$SE_SCRIPT" "$TAG"
     append_unique_line "$SS_SCRIPT" "(sleep 45 && $SCRIPT_PATH start) & # $TAG"
     append_unique_line "$NAT_SCRIPT" "(sleep 10 && $SCRIPT_PATH apply-rules) & # $TAG"
     append_unique_line "$FW_SCRIPT" "(sleep 10 && $SCRIPT_PATH apply-rules) & # $TAG"
+    append_unique_line "$SE_SCRIPT" "echo \"\$2\" | grep -q \"^mihomo_\" && $SCRIPT_PATH service-event \$(echo \"\$2\" | cut -d'_' -f2- | tr '_' ' ') & # $TAG"
 }
 
 install_files() {
@@ -260,6 +277,7 @@ normalize_local_installers
 ensure_entware
 install_files
 create_default_config
+migrate_local_dns_port
 create_state_files
 install_alias
 install_hooks

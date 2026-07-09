@@ -9,6 +9,20 @@ declare global {
 
 const apiOrigin = window.MIHOMO_API_ORIGIN?.replace(/\/$/, '') || ''
 const requestTimeoutMs = 45_000
+const merlinActions: Record<string, string> = {
+  start: 'mihomo_core_start',
+  stop: 'mihomo_core_stop',
+  restart: 'mihomo_core_restart',
+  'restart-core': 'mihomo_core_restart',
+  reload: 'mihomo_core_reload',
+  'reload-config': 'mihomo_core_reload',
+  'update-core': 'mihomo_core_update',
+  'update-subscription': 'mihomo_subscription_update',
+  'update-app': 'mihomo_web_update',
+  'restart-app': 'mihomo_web_restart',
+  'routing-apply': 'mihomo_routing_apply',
+  'mode-apply': 'mihomo_mode_apply'
+}
 
 const endpoint = (op: string, params: Record<string, string | number | boolean> = {}) => {
   const query = new URLSearchParams({ op })
@@ -63,8 +77,48 @@ export async function getLog(): Promise<string> {
 }
 
 export async function runAction(name: string): Promise<CommandResponse> {
-  const response = await request(endpoint('action', { name }), { method: 'POST' })
-  return parseJson<CommandResponse>(response)
+  const action = merlinActions[name]
+  if (!action) throw new Error(`Unknown action: ${name}`)
+
+  await new Promise<void>((resolve, reject) => {
+    const frameName = `mihomo_action_${Math.random().toString(36).slice(2)}`
+    const frame = document.createElement('iframe')
+    const form = document.createElement('form')
+    const timeout = window.setTimeout(() => cleanup(new Error('Router action timed out')), 10_000)
+
+    const cleanup = (error?: Error) => {
+      window.clearTimeout(timeout)
+      form.remove()
+      frame.remove()
+      if (error) reject(error)
+      else resolve()
+    }
+
+    frame.name = frameName
+    frame.hidden = true
+
+    form.method = 'post'
+    form.action = '/start_apply.htm'
+    form.target = frameName
+    for (const [name, value] of Object.entries({
+      action_mode: 'apply',
+      action_script: action,
+      action_wait: '',
+      modified: '0'
+    })) {
+      const input = document.createElement('input')
+      input.type = 'hidden'
+      input.name = name
+      input.value = value
+      form.append(input)
+    }
+
+    document.body.append(frame, form)
+    frame.addEventListener('load', () => window.setTimeout(() => cleanup(), 250), { once: true })
+    form.submit()
+  })
+
+  return { ok: true }
 }
 
 export async function saveConfig(config: string): Promise<CommandResponse> {

@@ -579,6 +579,7 @@ cleanup_hooks() {
     remove_hook_tag "$NAT_SCRIPT" "$TAG"
     remove_hook_tag "$FW_SCRIPT" "$TAG"
     remove_hook_tag "$SS_SCRIPT" "$TAG"
+    remove_hook_tag "$SE_SCRIPT" "$TAG"
 }
 
 remove_hook_tag() {

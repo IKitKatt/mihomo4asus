@@ -50,6 +50,7 @@ install_hooks() {
     append_hook_line "$SS_SCRIPT" "(sleep 45 && $SCRIPT_PATH start) & # $TAG"
     append_hook_line "$NAT_SCRIPT" "(sleep 10 && $SCRIPT_PATH apply-rules) & # $TAG"
     append_hook_line "$FW_SCRIPT" "(sleep 10 && $SCRIPT_PATH apply-rules) & # $TAG"
+    append_hook_line "$SE_SCRIPT" "echo \"\$2\" | grep -q \"^mihomo_\" && $SCRIPT_PATH service-event \$(echo \"\$2\" | cut -d'_' -f2- | tr '_' ' ') & # $TAG"
 }
 
 install_mihomo() {

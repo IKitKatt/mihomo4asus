@@ -99,3 +99,25 @@ stop_mihomo() {
     clear_core_log
     log "mihomo stopped"
 }
+
+service_event_mihomo() {
+    case "$1:$2" in
+        core:start) start_mihomo ;;
+        core:stop) stop_mihomo ;;
+        core:restart) stop_mihomo; sleep 2; start_mihomo ;;
+        core:reload) reload_mihomo_config ;;
+        core:update) update_mihomo ;;
+        routing:apply) apply_rules ;;
+        mode:apply)
+            if is_running; then
+                stop_mihomo
+                sleep 2
+                start_mihomo
+            fi
+            ;;
+        subscription:update) subscription_update_and_reload manual ;;
+        web:update) "$ADDON_DIR/webui/mihomo-web" update ;;
+        web:restart) "$ADDON_DIR/webui/mihomo-web" restart ;;
+        *) die "unknown Mihomo service event: $1 $2" ;;
+    esac
+}

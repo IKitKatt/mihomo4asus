@@ -241,21 +241,11 @@ save_routing() {
         plain_error "routing list limit is 128 devices" "400 Bad Request"
         return
     fi
-    set -- $body
-    output="$("$MIHOMO_CMD" routing mode "$mode" 2>&1)"
-    code="$?"
-    if [ "$code" -eq 0 ] && [ "$mode" != "off" ]; then
-        output2="$("$MIHOMO_CMD" routing set "$@" 2>&1)"
-        code="$?"
-        output="$output
-$output2"
-    fi
+    mkdir -p "$STATE_DIR" || { plain_error "cannot create routing state directory"; return; }
+    printf '%s\n' "$mode" > "$ROUTING_MODE_FILE" || { plain_error "cannot save routing mode"; return; }
+    printf '%s\n' "$body" > "$ROUTING_FILE" || { plain_error "cannot save routing list"; return; }
     headers
-    if [ "$code" -eq 0 ]; then
-        printf '{"ok":true,"output":'; json_string "$output"; printf '}\n'
-    else
-        printf '{"ok":false,"exitCode":%s,"error":' "$code"; json_string "$output"; printf '}\n'
-    fi
+    printf '{"ok":true,"output":"routing settings saved"}\n'
 }
 
 save_subscription() {
@@ -291,7 +281,15 @@ save_subscription_meta() {
 
 set_mode() {
     value="$(query_value value)"
-    case "$value" in tproxy|mixed|tun) run_json "$MIHOMO_CMD" mode set "$value" ;; *) plain_error "mode must be tproxy, mixed or tun" "400 Bad Request" ;; esac
+    case "$value" in
+        tproxy|mixed|tun)
+            mkdir -p "$STATE_DIR" || { plain_error "cannot create mode state directory"; return; }
+            printf '%s\n' "$value" > "$PROXY_MODE_FILE" || { plain_error "cannot save proxy mode"; return; }
+            headers
+            printf '{"ok":true,"output":"proxy mode saved"}\n'
+            ;;
+        *) plain_error "mode must be tproxy, mixed or tun" "400 Bad Request" ;;
+    esac
 }
 
 action() {

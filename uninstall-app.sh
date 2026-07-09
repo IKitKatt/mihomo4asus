@@ -11,6 +11,7 @@ WEB_CTL="$ADDON_DIR/webui/mihomo-web"
 SS_SCRIPT="${SS_SCRIPT:-/jffs/scripts/services-start}"
 NAT_SCRIPT="${NAT_SCRIPT:-/jffs/scripts/nat-start}"
 FW_SCRIPT="${FW_SCRIPT:-/jffs/scripts/firewall-start}"
+SE_SCRIPT="${SE_SCRIPT:-/jffs/scripts/service-event}"
 TAG="mihomo-script"
 WEB_TAG="mihomo-web"
 
@@ -52,6 +53,7 @@ stop_by_pidfile "$MIHOMO_HOME/run/mihomo-subscription.pid"
 remove_tagged_lines "$SS_SCRIPT" "$TAG"
 remove_tagged_lines "$NAT_SCRIPT" "$TAG"
 remove_tagged_lines "$FW_SCRIPT" "$TAG"
+remove_tagged_lines "$SE_SCRIPT" "$TAG"
 remove_tagged_lines "$SS_SCRIPT" "$WEB_TAG"
 
 if [ -f "$ADDON_DIR/state/webui.page" ]; then
@@ -75,9 +77,6 @@ if [ -f /tmp/menuTree.js ]; then
 fi
 
 rm -rf /www/user/mihomo
-if [ -L /www/MihomoAPP.asp ] && [ "$(readlink /www/MihomoAPP.asp 2>/dev/null)" = "$ADDON_DIR/Mihomo.asp" ]; then
-    rm -f /www/MihomoAPP.asp
-fi
 
 rm -rf "$ADDON_DIR" "$MIHOMO_HOME"
 rm -f "$LN_PATH" /opt/bin/mihomo

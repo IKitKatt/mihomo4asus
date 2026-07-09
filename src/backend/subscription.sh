@@ -703,17 +703,11 @@ subscription_update_config() {
         return 3
     }
 
-    cp "$tmp_raw" "$tmp_merged" || {
+    # Store the provider response verbatim. Operational settings are managed
+    # separately and must never be injected into or removed from a subscription.
+    mv "$tmp_raw" "$tmp_merged" || {
         rm -f "$tmp_raw" "$tmp_merged"
         log "ERROR: cannot prepare subscription config"
-        return 3
-    }
-    sanitize_subscription_config "$tmp_merged"
-    preserve_operational_config "$CONFIG_FILE" "$tmp_merged"
-    move_operational_keys_to_top "$tmp_merged"
-    detect_tproxy_port "$tmp_merged" >/dev/null || {
-        rm -f "$tmp_raw" "$tmp_merged"
-        log "ERROR: merged subscription config has no valid tproxy-port"
         return 3
     }
 
@@ -730,7 +724,6 @@ subscription_update_config() {
         log "ERROR: cannot install subscription config"
         return 3
     }
-    rm -f "$tmp_raw"
     touch_subscription_last
     log "subscription config updated"
     return 0

@@ -99,7 +99,7 @@ external-controller: 0.0.0.0:9090
 
 dns:
   enable: true
-  listen: 0.0.0.0:1053
+  listen: 0.0.0.0:7874
 
 proxies:
   - name: DIRECT

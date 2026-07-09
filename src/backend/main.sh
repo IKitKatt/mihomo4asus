@@ -25,6 +25,7 @@ case "$1" in
     exclude) shift; exclude_mihomo "$@" ;;
     include) shift; include_mihomo "$@" ;;
     uninstall) uninstall_mihomo ;;
+    service-event) shift; service_event_mihomo "$@" ;;
     apply-rules) apply_rules ;;
     help|-h|--help) usage_mihomo ;;
     *) usage_mihomo; exit 1 ;;
