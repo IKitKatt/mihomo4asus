@@ -1,9 +1,18 @@
 import type { CommandResponse, RoutingMode, StatusResponse } from './types'
 
+declare global {
+  interface Window {
+    MIHOMO_API_ORIGIN?: string
+    MIHOMO_ROUTER_LANGUAGE?: string
+  }
+}
+
+const apiOrigin = window.MIHOMO_API_ORIGIN?.replace(/\/$/, '') || ''
+
 const endpoint = (op: string, params: Record<string, string | number | boolean> = {}) => {
   const query = new URLSearchParams({ op })
   Object.entries(params).forEach(([key, value]) => query.set(key, String(value)))
-  return `/cgi-bin/api?${query.toString()}`
+  return `${apiOrigin}/cgi-bin/api?${query.toString()}`
 }
 
 async function parseJson<T>(response: Response): Promise<T> {

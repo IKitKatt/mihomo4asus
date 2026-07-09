@@ -31,7 +31,7 @@ Copy this single command to the router SSH console:
 wget -q -O /tmp/mihomo4asus-install.sh https://raw.githubusercontent.com/IKitKatt/mihomo4asus/web/install-app.sh && sh /tmp/mihomo4asus-install.sh
 ```
 
-The full installer copies the CLI, backend modules, Merlin addon page, Vue web frontend and CGI backend to `/jffs/addons/mihomo`, installs `curl` and `lighttpd` through Entware `/opt` when needed, starts the web service on port `5581`, and mounts a `Mihomo` tab at the end of the Merlin VPN menu when Addons API is available.
+The full installer copies the CLI, backend modules, Merlin addon page, Vue web frontend and CGI backend to `/jffs/addons/mihomo`, installs `curl` and `lighttpd` through Entware `/opt` when needed, starts the CGI API service on port `5581`, and mounts the Vue application directly as a `Mihomo` tab at the end of the Merlin VPN menu when Addons API is available.
 
 The installer creates the required folders, installs the entrypoint and backend modules to `/jffs/addons/mihomo`, creates the `mihomo` command in `/opt/bin/mihomo`, downloads the correct Mihomo core for the router architecture, and installs the core to `/opt/root/mihomo/mihomo`.
 
@@ -54,7 +54,7 @@ src/frontend/www/app.js
 src/frontend/www/cgi-bin/api
 ```
 
-Do not copy `src/frontend/app/` (including `node_modules`), `src/examples/`, `docs/`, `.git/`, or development files. The router needs only the already-built frontend in `src/frontend/www`; Node.js, TypeScript, Vite, and Vue source files are not used at runtime.
+Do not copy `src/frontend/app/` (including `node_modules`), `docs/`, `.git/`, or development files. The router needs only the already-built frontend in `src/frontend/www`; Node.js, TypeScript, Vite, and Vue source files are not used at runtime.
 
 Then run:
 
@@ -143,13 +143,7 @@ mihomo restart
 
 ## Web Application
 
-After full install, open:
-
-```sh
-http://<router-lan-ip>:5581/
-```
-
-The Merlin Addons API page also appears as `VPN -> Mihomo` on supported firmware. The web backend is a small CGI API served by Entware `lighttpd` using `src/frontend/server.conf`; it does not require Node.js or Python on the router. The web frontend source is in `src/frontend/app` and is built with Vue 3, TypeScript and Vite into static files under `src/frontend/www`.
+After full install, open `VPN -> Mihomo` in the Merlin interface. The Vue application is served directly by the router HTTP server through `/ext/mihomo/`; it is not embedded in an iframe. The web backend is a small CGI API served by Entware `lighttpd` on port `5581` using `src/frontend/server.conf`; it does not require Node.js or Python on the router. The web frontend source is in `src/frontend/app` and is built with Vue 3, TypeScript and Vite into static files under `src/frontend/www`.
 
 The web interface can:
 
@@ -235,7 +229,6 @@ Runtime backend code is decomposed into modules:
 
 ```text
 src/cli/mihomo                  CLI entrypoint
-src/examples/                   YAML and routing-list examples
 src/backend/_globals.sh
 src/backend/core.sh
 src/backend/subscription.sh

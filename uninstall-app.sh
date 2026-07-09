@@ -69,6 +69,8 @@ if [ -f /tmp/menuTree.js ]; then
     mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js 2>/dev/null || true
 fi
 
+rm -rf /www/user/mihomo
+
 rm -rf "$ADDON_DIR" "$MIHOMO_HOME"
 rm -f "$LN_PATH" /opt/bin/mihomo
 

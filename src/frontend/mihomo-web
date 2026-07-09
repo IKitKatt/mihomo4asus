@@ -6,6 +6,7 @@ ADDON_DIR="${ADDON_DIR:-/jffs/addons/mihomo}"
 WEB_ROOT="${WEB_ROOT:-$ADDON_DIR/webui/www}"
 WEB_CONF="${WEB_CONF:-$ADDON_DIR/webui/server.conf}"
 WEB_PORT="${MIHOMO_WEB_PORT:-5581}"
+MERLIN_ASSET_DIR="${MERLIN_ASSET_DIR:-/www/user/mihomo}"
 MIHOMO_HOME="${MIHOMO_HOME:-/opt/root/mihomo}"
 RUN_DIR="${RUN_DIR:-$MIHOMO_HOME/run}"
 STATE_DIR="${STATE_DIR:-$MIHOMO_HOME/state}"
@@ -136,6 +137,10 @@ mount_webui() {
     echo "mihomo" > "/www/user/${am_webui_page%.asp}.title" || die "cannot create Merlin page title"
     echo "$am_webui_page" > "$PAGE_FILE"
 
+    mkdir -p "$MERLIN_ASSET_DIR" || die "cannot create Merlin asset directory"
+    ln -s -f "$WEB_ROOT/app.js" "$MERLIN_ASSET_DIR/app.js" || die "cannot publish Mihomo application script"
+    ln -s -f "$WEB_ROOT/app.css" "$MERLIN_ASSET_DIR/app.css" || die "cannot publish Mihomo application stylesheet"
+
     if [ ! -f /tmp/menuTree.js ]; then
         cp /www/require/modules/menuTree.js /tmp/menuTree.js || die "cannot copy Merlin menu"
         mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js || die "cannot mount Merlin menu"
@@ -186,6 +191,7 @@ unmount_webui() {
     page="$am_webui_page"
     [ -n "$page" ] && [ "$page" != "none" ] && rm -f "/www/user/$page"
     [ -n "$page" ] && [ "$page" != "none" ] && rm -f "/www/user/${page%.asp}.title"
+    rm -rf "$MERLIN_ASSET_DIR"
     rm -f "$PAGE_FILE"
     if [ -f /tmp/menuTree.js ]; then
         sed -i '/tabName: "Mihomo"/d' /tmp/menuTree.js

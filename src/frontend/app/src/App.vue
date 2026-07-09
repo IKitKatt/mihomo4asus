@@ -160,7 +160,7 @@ const messages = {
 type Page = 'main' | 'config' | 'logs'
 
 const routeParams = new URLSearchParams(window.location.search)
-const routerLang = routeParams.get('lang') || ''
+const routerLang = window.MIHOMO_ROUTER_LANGUAGE || routeParams.get('lang') || ''
 const locale: keyof typeof messages = /^en/i.test(routerLang) ? 'en' : 'ru'
 const t = (key: keyof typeof messages.en) => messages[locale][key]
 
