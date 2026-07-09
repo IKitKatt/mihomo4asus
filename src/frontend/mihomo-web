@@ -1,5 +1,5 @@
 #!/bin/sh
-
+#
 # Entware-backed web service for mihomo4asus.
 
 ADDON_DIR="${ADDON_DIR:-/jffs/addons/mihomo}"
