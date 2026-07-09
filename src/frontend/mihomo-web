@@ -1,0 +1,195 @@
+#!/bin/sh
+
+# Entware-backed web service for mihomo4asus.
+
+ADDON_DIR="${ADDON_DIR:-/jffs/addons/mihomo}"
+WEB_ROOT="${WEB_ROOT:-$ADDON_DIR/webui/www}"
+WEB_CONF="${WEB_CONF:-$ADDON_DIR/webui/server.conf}"
+WEB_PORT="${MIHOMO_WEB_PORT:-5581}"
+MIHOMO_HOME="${MIHOMO_HOME:-/opt/root/mihomo}"
+RUN_DIR="${RUN_DIR:-$MIHOMO_HOME/run}"
+STATE_DIR="${STATE_DIR:-$MIHOMO_HOME/state}"
+PID_FILE="${PID_FILE:-$RUN_DIR/mihomo-web.pid}"
+PAGE_FILE="$STATE_DIR/webui.page"
+SS_SCRIPT="${SS_SCRIPT:-/jffs/scripts/services-start}"
+TAG="mihomo-web"
+RAW_BASE="${RAW_BASE:-https://raw.githubusercontent.com/IKitKatt/mihomo4asus/main}"
+
+log() {
+    printf '%s\n' "$1" | logger -t mihomo-web
+    printf '%s\n' "$1"
+}
+
+die() {
+    log "ERROR: $1"
+    exit 1
+}
+
+lighttpd_bin() {
+    for path in /opt/sbin/lighttpd /opt/bin/lighttpd; do
+        [ -x "$path" ] && { printf '%s\n' "$path"; return 0; }
+    done
+    command -v lighttpd 2>/dev/null && return 0
+    return 1
+}
+
+download_to_file() {
+    url="$1"
+    dst="$2"
+    wget -q -O "$dst" "$url" 2>/dev/null || \
+        curl -fsSL -o "$dst" "$url" 2>/dev/null
+}
+
+ensure_dirs() {
+    [ -d /opt ] || die "Entware /opt is not available"
+    mkdir -p "$WEB_ROOT/cgi-bin" "$RUN_DIR" "$STATE_DIR" /jffs/scripts || die "cannot create web directories"
+}
+
+is_running() {
+    pid="$(cat "$PID_FILE" 2>/dev/null)"
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+start_service() {
+    ensure_dirs
+    is_running && { log "mihomo web is already running on port $WEB_PORT"; return 0; }
+    lighttpd_bin="$(lighttpd_bin)" || die "lighttpd is required; install it with Entware opkg"
+    [ -f "$WEB_ROOT/index.html" ] || die "missing $WEB_ROOT/index.html"
+    [ -f "$WEB_CONF" ] || die "missing $WEB_CONF"
+    "$lighttpd_bin" -f "$WEB_CONF" || die "mihomo web failed to start"
+    sleep 1
+    is_running || die "mihomo web failed to start"
+    install_hook
+    mount_webui
+    log "mihomo web started on port $WEB_PORT"
+}
+
+stop_service() {
+    pid="$(cat "$PID_FILE" 2>/dev/null)"
+    case "$pid" in
+        ''|*[!0-9]*) ;;
+        *) kill "$pid" 2>/dev/null ;;
+    esac
+    rm -f "$PID_FILE"
+    log "mihomo web stopped"
+}
+
+install_hook() {
+    [ -f "$SS_SCRIPT" ] || { echo "#!/bin/sh" > "$SS_SCRIPT"; chmod 755 "$SS_SCRIPT"; }
+    line="(sleep 20 && $ADDON_DIR/webui/mihomo-web start) & # $TAG"
+    grep -qF "$line" "$SS_SCRIPT" 2>/dev/null || echo "$line" >> "$SS_SCRIPT"
+}
+
+remove_hook() {
+    [ -f "$SS_SCRIPT" ] && sed -i "/$TAG/d" "$SS_SCRIPT"
+}
+
+mount_webui() {
+    [ -f /usr/sbin/helper.sh ] || return 0
+    # shellcheck disable=SC1091
+    . /usr/sbin/helper.sh
+    nvram get rc_support 2>/dev/null | grep -q am_addons || return 0
+    [ -f "$ADDON_DIR/Mihomo.asp" ] || return 0
+    saved_page="$(cat "$PAGE_FILE" 2>/dev/null)"
+    if [ -n "$saved_page" ]; then
+        cp "$ADDON_DIR/Mihomo.asp" "/www/user/$saved_page" 2>/dev/null && am_webui_page="$saved_page"
+    fi
+    if [ -z "${am_webui_page:-}" ]; then
+        am_get_webui_page "$ADDON_DIR/Mihomo.asp"
+    fi
+    [ "$am_webui_page" != "none" ] || die "cannot allocate Merlin webui page"
+    cp "$ADDON_DIR/Mihomo.asp" "/www/user/$am_webui_page" || die "cannot mount webui page"
+    echo "$am_webui_page" > "$PAGE_FILE"
+
+    if [ ! -f /tmp/menuTree.js ]; then
+        cp /www/require/modules/menuTree.js /tmp/menuTree.js
+        mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js
+    fi
+    tmp_menu="/tmp/menuTree.mihomo.$$"
+    entry="{url: \"$am_webui_page\", tabName: \"Mihomo\"},"
+    awk -v entry="$entry" '
+        /tabName: "Mihomo"/ { next }
+        {
+            lines[++n] = $0
+            if ($0 ~ /url:[[:space:]]*"/ && $0 ~ /(VPN|OpenVPN|WireGuard|IPSec)/) {
+                last_vpn = n
+            }
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                print lines[i]
+                if (i == last_vpn) print entry
+            }
+            if (!last_vpn) print entry
+        }
+    ' /tmp/menuTree.js > "$tmp_menu" && mv "$tmp_menu" /tmp/menuTree.js
+    umount /www/require/modules/menuTree.js 2>/dev/null
+    mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js
+}
+
+unmount_webui() {
+    page="$(cat "$PAGE_FILE" 2>/dev/null)"
+    [ -n "$page" ] && rm -f "/www/user/$page"
+    rm -f "$PAGE_FILE"
+    if [ -f /tmp/menuTree.js ]; then
+        sed -i '/tabName: "Mihomo"/d' /tmp/menuTree.js
+        umount /www/require/modules/menuTree.js 2>/dev/null
+        mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js 2>/dev/null
+    fi
+}
+
+update_files() {
+    ensure_dirs
+    while read -r src dst; do
+        [ -n "$src" ] || continue
+        mkdir -p "$(dirname "$ADDON_DIR/$dst")"
+        download_to_file "$RAW_BASE/$src" "$ADDON_DIR/$dst" || die "cannot download $src"
+    done <<'EOF'
+src/cli/mihomo mihomo
+src/backend/_globals.sh src/backend/_globals.sh
+src/backend/core.sh src/backend/core.sh
+src/backend/subscription.sh src/backend/subscription.sh
+src/backend/routing.sh src/backend/routing.sh
+src/backend/service.sh src/backend/service.sh
+src/backend/install.sh src/backend/install.sh
+src/backend/cli.sh src/backend/cli.sh
+src/backend/main.sh src/backend/main.sh
+src/frontend/mihomo-web webui/mihomo-web
+src/frontend/server.conf webui/server.conf
+src/frontend/Mihomo.asp webui/Mihomo.asp
+src/frontend/www/index.html webui/www/index.html
+src/frontend/www/app.css webui/www/app.css
+src/frontend/www/app.js webui/www/app.js
+src/frontend/www/cgi-bin/api webui/www/cgi-bin/api
+EOF
+    cp "$ADDON_DIR/webui/Mihomo.asp" "$ADDON_DIR/Mihomo.asp" || die "cannot stage Merlin page"
+    chmod 755 "$ADDON_DIR/mihomo" "$ADDON_DIR/webui/mihomo-web" "$WEB_ROOT/cgi-bin/api"
+    chmod 644 "$ADDON_DIR"/src/backend/*.sh
+    chmod 644 "$ADDON_DIR/webui/server.conf"
+    chmod 644 "$ADDON_DIR/webui/Mihomo.asp" "$WEB_ROOT/index.html" "$WEB_ROOT/app.css" "$WEB_ROOT/app.js"
+    chmod 644 "$ADDON_DIR/Mihomo.asp"
+    log "mihomo web files updated"
+}
+
+status_service() {
+    if is_running; then
+        log "mihomo web: running on port $WEB_PORT"
+    else
+        log "mihomo web: stopped"
+    fi
+}
+
+case "$1" in
+    start) start_service ;;
+    stop) stop_service ;;
+    restart) stop_service; sleep 1; start_service ;;
+    status) status_service ;;
+    mount) ensure_dirs; mount_webui ;;
+    unmount) unmount_webui ;;
+    update) update_files; stop_service; sleep 1; start_service ;;
+    uninstall) stop_service; remove_hook; unmount_webui; rm -rf "$ADDON_DIR/webui" "$ADDON_DIR/Mihomo.asp" ;;
+    *) printf 'Usage: %s {start|stop|restart|status|mount|unmount|update|uninstall}\n' "$0"; exit 1 ;;
+esac

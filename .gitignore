@@ -1,4 +1,5 @@
 # Cache files
+.agents/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -23,21 +24,16 @@ desktop.ini
 # Logs
 *.log
 logs/
+src/frontend/app/node_modules/
+src/frontend/app/tsconfig.tsbuildinfo
+src/frontend/app/node_modules/.vite-temp/
+src/frontend/app/node_modules/.vue-global-types/
 
 # Local/runtime files
 *.pid
 *.tmp
 *.bak
 
-# Old script snapshots
-old/*
-!old/.gitkeep
-
-# Project-local files
-config.yaml
-config-smart.yaml
-install.sh
-include.list
-
-# Old folder
+# Historical local snapshots
 old/
+docs/

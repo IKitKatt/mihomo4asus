@@ -1,0 +1,18 @@
+#!/bin/sh
+
+SCRIPT_SELF="$0"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_SELF")" 2>/dev/null && pwd)"
+MIHOMO_LIB_DIR="${MIHOMO_LIB_DIR:-$SCRIPT_DIR/src/backend}"
+
+for module in _globals core subscription routing service install cli main; do
+    module_path="$MIHOMO_LIB_DIR/$module.sh"
+    [ -f "$module_path" ] || {
+        echo "ERROR: missing mihomo backend module: $module_path" >&2
+        echo "Install the full application with install-app.sh or set MIHOMO_LIB_DIR." >&2
+        exit 1
+    }
+    # shellcheck disable=SC1090
+    . "$module_path"
+done
+
+mihomo_main "$@"

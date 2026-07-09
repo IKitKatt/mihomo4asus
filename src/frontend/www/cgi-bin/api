@@ -1,0 +1,325 @@
+#!/bin/sh
+
+MIHOMO_CMD="${MIHOMO_CMD:-/jffs/addons/mihomo/mihomo}"
+WEB_CTL="${WEB_CTL:-/jffs/addons/mihomo/webui/mihomo-web}"
+MIHOMO_HOME="${MIHOMO_HOME:-/opt/root/mihomo}"
+CONFIG_DIR="${CONFIG_DIR:-$MIHOMO_HOME/config}"
+CONFIG_FILE="${CONFIG_FILE:-$CONFIG_DIR/config.yaml}"
+SUB_CONFIG_FILE="${SUB_CONFIG_FILE:-$CONFIG_DIR/sub-config.yaml}"
+STATE_DIR="${STATE_DIR:-$MIHOMO_HOME/state}"
+RUN_DIR="${RUN_DIR:-$MIHOMO_HOME/run}"
+LOG_FILE="${LOG_FILE:-$MIHOMO_HOME/mihomo.log}"
+ROUTING_FILE="${ROUTING_FILE:-$STATE_DIR/routing.list}"
+ROUTING_MODE_FILE="${ROUTING_MODE_FILE:-$STATE_DIR/routing.mode}"
+PROXY_MODE_FILE="${PROXY_MODE_FILE:-$STATE_DIR/proxy.mode}"
+SUBSCRIPTION_SETTINGS_FILE="${SUBSCRIPTION_SETTINGS_FILE:-$STATE_DIR/subscription.conf}"
+MIHOMO_BIN="${MIHOMO_BIN:-$MIHOMO_HOME/mihomo}"
+
+headers() {
+    printf 'Status: %s\r\n' "${1:-200 OK}"
+    printf 'Content-Type: %s; charset=utf-8\r\n' "${2:-application/json}"
+    printf 'Access-Control-Allow-Origin: *\r\n'
+    printf 'Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n'
+    printf 'Access-Control-Allow-Headers: Content-Type\r\n'
+    printf 'Cache-Control: no-store\r\n\r\n'
+}
+
+query_value() {
+    key="$1"
+    printf '%s' "${QUERY_STRING:-}" | tr '&' '\n' | awk -F= -v key="$key" '$1 == key { print $2; exit }'
+}
+
+read_body() {
+    len="${CONTENT_LENGTH:-0}"
+    case "$len" in ''|*[!0-9]*) len=0 ;; esac
+    [ "$len" -gt 0 ] 2>/dev/null || return 0
+    dd bs=1 count="$len" 2>/dev/null
+}
+
+json_escape() {
+    awk 'BEGIN { ORS="" } { gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); gsub(/\t/, "\\t"); gsub(/\r/, "\\r"); gsub(/\n/, "\\n"); print; if (!last) print "\\n" }' | sed 's/\\n$//'
+}
+
+json_string() {
+    printf '"%s"' "$(printf '%s' "$1" | json_escape)"
+}
+
+plain_error() {
+    headers "${2:-500 Internal Server Error}"
+    printf '{"ok":false,"error":'
+    json_string "$1"
+    printf '}\n'
+}
+
+run_json() {
+    output="$("$@" 2>&1)"
+    code="$?"
+    headers
+    if [ "$code" -eq 0 ]; then
+        printf '{"ok":true,"output":'
+        json_string "$output"
+        printf '}\n'
+    else
+        printf '{"ok":false,"exitCode":%s,"error":' "$code"
+        json_string "$output"
+        printf '}\n'
+    fi
+}
+
+setting_value() {
+    key="$1"
+    grep -m1 "^$key=" "$SUBSCRIPTION_SETTINGS_FILE" 2>/dev/null | sed 's/^[^=]*=//;s/\r$//'
+}
+
+json_array_from_file() {
+    file="$1"
+    printf '['
+    first=1
+    [ -f "$file" ] && awk '{ sub(/\r$/, ""); sub(/[[:space:]]#.*/, ""); item=$1; if (item != "" && item !~ /^#/) print item }' "$file" |
+    while IFS= read -r item || [ -n "$item" ]; do
+        [ "$first" = 1 ] || printf ','
+        first=0
+        json_string "$item"
+    done
+    printf ']'
+}
+
+json_devices() {
+    tmp="$RUN_DIR/lan-devices.$$"
+    mkdir -p "$RUN_DIR" 2>/dev/null
+    rm -f "$tmp"
+
+    if [ -f /var/lib/misc/dnsmasq.leases ]; then
+        awk '{ print $3 "|" $2 "|" $4 }' /var/lib/misc/dnsmasq.leases >> "$tmp" 2>/dev/null
+    fi
+    if command -v nvram >/dev/null 2>&1; then
+        nvram get dhcp_staticlist 2>/dev/null | tr '<' '\n' | awk -F'>' 'NF >= 2 {
+            mac=$1
+            ip=$2
+            name=$3
+            if (ip != "") print ip "|" mac "|" name
+        }' >> "$tmp" 2>/dev/null
+    fi
+
+    printf '['
+    first=1
+    if [ -f "$tmp" ]; then
+        awk -F'|' '
+            $1 != "" && !seen[$1]++ {
+                print $1 "|" $2 "|" $3
+            }
+        ' "$tmp" | while IFS='|' read -r ip mac name || [ -n "$ip" ]; do
+            [ "$first" = 1 ] || printf ','
+            first=0
+            printf '{"ip":'
+            json_string "$ip"
+            printf ',"mac":'
+            json_string "$mac"
+            printf ',"name":'
+            json_string "$name"
+            printf '}'
+        done
+    fi
+    printf ']'
+    rm -f "$tmp"
+}
+
+active_config_file() {
+    type="$(setting_value TYPE)"
+    url="$(setting_value URL)"
+    if { [ "$type" = "url" ] || [ "$type" = "remote" ] || [ -n "$url" ]; } && [ -f "$SUB_CONFIG_FILE" ]; then
+        printf '%s\n' "$SUB_CONFIG_FILE"
+    else
+        printf '%s\n' "$CONFIG_FILE"
+    fi
+}
+
+top_level_value() {
+    key="$1"
+    file="$2"
+    awk -v key="$key" '$0 ~ "^" key ":[[:space:]]*" { line=$0; sub("^[^:]*:[[:space:]]*", "", line); sub("[[:space:]]#.*$", "", line); gsub(/^["'\'' ]+|["'\'' ]+$/, "", line); print line; exit }' "$file" 2>/dev/null
+}
+
+controller_url() {
+    file="$(active_config_file)"
+    addr="$(top_level_value external-controller "$file")"
+    [ -n "$addr" ] || return 0
+    host="${addr%:*}"
+    port="${addr##*:}"
+    case "$port" in ''|*[!0-9]*) return 0 ;; esac
+    case "$host" in 0.0.0.0|::|127.0.0.1|"") host="${HTTP_HOST%%:*}" ;; esac
+    printf 'http://%s:%s/ui/' "$host" "$port"
+}
+
+core_version() {
+    [ -x "$MIHOMO_BIN" ] || return 0
+    "$MIHOMO_BIN" -v 2>/dev/null | head -n 1
+}
+
+is_running() {
+    pid="$(cat "$RUN_DIR/mihomo.pid" 2>/dev/null)"
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null
+}
+
+normalize_items() {
+    awk '{ gsub(/\r/, ""); for (i = 1; i <= NF; i++) if ($i !~ /^#/) print $i }'
+}
+
+validate_route_items() {
+    awk '
+        NF && $0 !~ /^([0-9]{1,3}\.){3}[0-9]{1,3}(\/([0-9]|[12][0-9]|3[0-2]))?$/ { bad=1 }
+        END { exit bad ? 1 : 0 }
+    '
+}
+
+status_json() {
+    cfg="$(active_config_file)"
+    running=false
+    is_running && running=true
+    proxy_mode="$(cat "$PROXY_MODE_FILE" 2>/dev/null | sed 's/\r$//')"
+    case "$proxy_mode" in tproxy|mixed|tun) ;; *) proxy_mode=tproxy ;; esac
+    routing_mode="$(cat "$ROUTING_MODE_FILE" 2>/dev/null | sed 's/\r$//')"
+    case "$routing_mode" in include|exclude) ;; *) routing_mode=off ;; esac
+    sub_type="$(setting_value TYPE)"
+    [ -n "$sub_type" ] || sub_type=local
+    sub_hours="$(setting_value UPDATE_HOURS)"
+    case "$sub_hours" in ''|*[!0-9]*) sub_hours=1 ;; esac
+    scan_local="$(setting_value SCAN_LOCAL)"
+    case "$scan_local" in 1|yes|on|true|enabled) scan_local=true ;; *) scan_local=false ;; esac
+
+    headers
+    printf '{"ok":true,'
+    printf '"running":%s,' "$running"
+    printf '"proxyMode":'; json_string "$proxy_mode"; printf ','
+    printf '"routingMode":'; json_string "$routing_mode"; printf ','
+    printf '"activeConfig":'; json_string "$cfg"; printf ','
+    printf '"localConfig":'; json_string "$CONFIG_FILE"; printf ','
+    printf '"subscriptionConfig":'; json_string "$SUB_CONFIG_FILE"; printf ','
+    printf '"logFile":'; json_string "$LOG_FILE"; printf ','
+    printf '"coreVersion":'; json_string "$(core_version)"; printf ','
+    printf '"controllerUrl":'; json_string "$(controller_url)"; printf ','
+    hwid_enabled="$(setting_value HWID_ENABLED)"
+    case "$hwid_enabled" in 0|no|off|false|disabled) hwid_enabled=false ;; *) hwid_enabled=true ;; esac
+    printf '"subscription":{"type":'; json_string "$sub_type"; printf ',"url":'; json_string "$(setting_value URL)"; printf ',"hours":%s,' "$sub_hours"
+    printf '"hwidEnabled":%s,' "$hwid_enabled"
+    printf '"scanLocal":%s},' "$scan_local"
+    printf '"routingItems":'; json_array_from_file "$ROUTING_FILE"; printf ','
+    printf '"lanDevices":'; json_devices
+    printf '}\n'
+}
+
+file_text() {
+    headers "200 OK" "text/plain"
+    [ -f "$1" ] && cat "$1"
+}
+
+log_text() {
+    headers "200 OK" "text/plain"
+    [ -f "$LOG_FILE" ] && tail -n 500 "$LOG_FILE"
+}
+
+save_config() {
+    mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$RUN_DIR" || { plain_error "cannot create config directories"; return; }
+    tmp="$RUN_DIR/config.yaml.$$"
+    read_body > "$tmp" || { rm -f "$tmp"; plain_error "cannot read request body"; return; }
+    [ -s "$tmp" ] || { rm -f "$tmp"; plain_error "config body is empty" "400 Bad Request"; return; }
+    mv "$tmp" "$CONFIG_FILE" || { rm -f "$tmp"; plain_error "cannot save config"; return; }
+    run_json "$MIHOMO_CMD" subscription local
+}
+
+save_routing() {
+    mode="$(query_value mode)"
+    case "$mode" in include|exclude|off) ;; *) plain_error "mode must be include, exclude or off" "400 Bad Request"; return ;; esac
+    body="$(read_body | normalize_items)"
+    if [ -n "$body" ] && ! printf '%s\n' "$body" | validate_route_items; then
+        plain_error "routing list contains invalid IP/CIDR values" "400 Bad Request"
+        return
+    fi
+    route_count="$(printf '%s\n' "$body" | awk 'NF { count++ } END { print count + 0 }')"
+    if [ "$route_count" -gt 128 ] 2>/dev/null; then
+        plain_error "routing list limit is 128 devices" "400 Bad Request"
+        return
+    fi
+    set -- $body
+    output="$("$MIHOMO_CMD" routing mode "$mode" 2>&1)"
+    code="$?"
+    if [ "$code" -eq 0 ] && [ "$mode" != "off" ]; then
+        output2="$("$MIHOMO_CMD" routing set "$@" 2>&1)"
+        code="$?"
+        output="$output
+$output2"
+    fi
+    headers
+    if [ "$code" -eq 0 ]; then
+        printf '{"ok":true,"output":'; json_string "$output"; printf '}\n'
+    else
+        printf '{"ok":false,"exitCode":%s,"error":' "$code"; json_string "$output"; printf '}\n'
+    fi
+}
+
+save_subscription() {
+    type="$(query_value type)"
+    case "$type" in
+        local) run_json "$MIHOMO_CMD" subscription local ;;
+        url)
+            hours="$(query_value hours)"
+            case "$hours" in ''|*[!0-9]*) hours=1 ;; esac
+            url="$(read_body)"
+            [ -n "$url" ] || { plain_error "subscription URL is empty" "400 Bad Request"; return; }
+            run_json "$MIHOMO_CMD" subscription set "$url" "$hours"
+            ;;
+        *) plain_error "subscription type must be local or url" "400 Bad Request" ;;
+    esac
+}
+
+save_subscription_meta() {
+    field="$(query_value field)"
+    body="$(read_body)"
+    case "$field" in
+        hwidEnabled)
+            case "$body" in true|1|on|yes|enabled) body=on ;; *) body=off ;; esac
+            run_json "$MIHOMO_CMD" subscription hwid-support "$body"
+            ;;
+        scanLocal)
+            case "$body" in true|1|on|yes|enabled) body=on ;; *) body=off ;; esac
+            run_json "$MIHOMO_CMD" subscription scan-local "$body"
+            ;;
+        *) plain_error "unknown subscription field" "400 Bad Request" ;;
+    esac
+}
+
+set_mode() {
+    value="$(query_value value)"
+    case "$value" in tproxy|mixed|tun) run_json "$MIHOMO_CMD" mode set "$value" ;; *) plain_error "mode must be tproxy, mixed or tun" "400 Bad Request" ;; esac
+}
+
+action() {
+    name="$(query_value name)"
+    case "$name" in
+        start) run_json "$MIHOMO_CMD" start ;;
+        stop) run_json "$MIHOMO_CMD" stop ;;
+        restart|restart-core) run_json "$MIHOMO_CMD" restart ;;
+        reload|reload-config) run_json "$MIHOMO_CMD" reload ;;
+        update-core) run_json "$MIHOMO_CMD" update core ;;
+        update-subscription) run_json "$MIHOMO_CMD" subscription update ;;
+        update-app) run_json "$WEB_CTL" update ;;
+        restart-app) run_json "$WEB_CTL" restart ;;
+        *) plain_error "unknown action" "400 Bad Request" ;;
+    esac
+}
+
+[ "${REQUEST_METHOD:-GET}" = "OPTIONS" ] && { headers; exit 0; }
+
+case "$(query_value op)" in
+    status) status_json ;;
+    config) file_text "$(active_config_file)" ;;
+    log) log_text ;;
+    save-config) save_config ;;
+    routing) save_routing ;;
+    subscription) save_subscription ;;
+    subscription-meta) save_subscription_meta ;;
+    mode) set_mode ;;
+    action) action ;;
+    *) plain_error "unknown op" "404 Not Found" ;;
+esac
