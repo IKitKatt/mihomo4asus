@@ -16,6 +16,12 @@ export interface LanDevice {
   name: string
 }
 
+export interface OperationState {
+  id: string
+  name: string
+  state: 'idle' | 'running' | 'success' | 'failed'
+}
+
 export interface StatusResponse {
   ok: true
   running: boolean
@@ -28,6 +34,7 @@ export interface StatusResponse {
   coreVersion: string
   coreArchitecture: string
   controllerUrl: string
+  operation: OperationState
   subscription: SubscriptionState
   routingItems: string[]
   lanDevices: LanDevice[]

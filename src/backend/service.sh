@@ -100,7 +100,35 @@ stop_mihomo() {
     log "mihomo stopped"
 }
 
+write_action_status() {
+    action_id="$1"
+    action_name="$2"
+    action_state="$3"
+    mkdir -p "$RUN_DIR" 2>/dev/null || return 0
+    printf '%s|%s|%s\n' "$action_id" "$action_name" "$action_state" > "$ACTION_STATUS_FILE" 2>/dev/null
+}
+
+finish_service_event() {
+    exit_code="$1"
+    if [ "$exit_code" -eq 0 ]; then
+        write_action_status "$service_action_id" "$service_action_name" success
+    else
+        write_action_status "$service_action_id" "$service_action_name" failed
+    fi
+    return 0
+}
+
+clear_mihomo_log() {
+    clear_core_log
+    : > "$LOG_FILE" 2>/dev/null
+}
+
 service_event_mihomo() {
+    service_action_name="$1:$2"
+    service_action_id="$(date +%s 2>/dev/null)-$$"
+    write_action_status "$service_action_id" "$service_action_name" running
+    trap 'finish_service_event "$?"' 0
+
     case "$1:$2" in
         core:start) start_mihomo ;;
         core:stop) stop_mihomo ;;
@@ -116,6 +144,7 @@ service_event_mihomo() {
             fi
             ;;
         subscription:update) subscription_update_and_reload manual ;;
+        log:clear) clear_mihomo_log ;;
         web:update) "$ADDON_DIR/webui/mihomo-web" update ;;
         web:restart) "$ADDON_DIR/webui/mihomo-web" restart ;;
         *) die "unknown Mihomo service event: $1 $2" ;;

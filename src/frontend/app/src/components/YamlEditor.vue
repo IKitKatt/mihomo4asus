@@ -67,8 +67,10 @@ const theme = EditorView.theme({
 }, { dark: true })
 
 const highlighting = HighlightStyle.define([
-  { tag: [tags.keyword, tags.bool, tags.null], color: '#d8b255' },
-  { tag: tags.propertyName, color: '#d7dedf' },
+  { tag: tags.keyword, color: '#d8b255' },
+  { tag: tags.bool, color: '#76c7e7' },
+  { tag: tags.null, color: '#c7a8d9' },
+  { tag: tags.propertyName, color: '#e0c46c' },
   { tag: tags.string, color: '#bddb9a' },
   { tag: tags.number, color: '#dfa96a' },
   { tag: tags.comment, color: '#77878b', fontStyle: 'italic' },

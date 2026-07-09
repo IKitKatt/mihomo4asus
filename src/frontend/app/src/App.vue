@@ -13,7 +13,7 @@ import {
   saveSubscriptionUrl,
   useLocalSubscription
 } from './api'
-import type { LanDevice, ProxyMode, RoutingMode, StatusResponse } from './types'
+import type { LanDevice, OperationState, ProxyMode, RoutingMode, StatusResponse } from './types'
 import YamlEditor from './components/YamlEditor.vue'
 
 const messages = {
@@ -58,6 +58,8 @@ const messages = {
     routingTableTitle: 'Устройства LAN для маршрутизации',
     removeDevice: 'Убрать из списка',
     addDelete: 'Добавить / удалить',
+    selectKnownDevice: 'Выберите устройство',
+    manualAddress: 'IP/CIDR вручную',
     hostname: 'Имя',
     macAddress: 'MAC',
     addIp: 'Добавить IP',
@@ -79,6 +81,7 @@ const messages = {
     updateApp: 'Обновить приложение',
     restartWeb: 'Перезапустить Web',
     refreshLog: 'Обновить лог',
+    clearLog: 'Очистить лог',
     emptyLog: 'Лог пуст.',
     done: 'Готово',
     actionQueued: 'Команда передана роутеру',
@@ -86,6 +89,12 @@ const messages = {
     configSaved: 'Конфиг сохранён',
     modeApplied: 'Режим применён',
     modePending: 'Режим не был применён. Проверьте Log.',
+    operationPending: 'Операция не завершилась. Проверьте Log.',
+    operationFailed: 'Операция завершилась с ошибкой. Проверьте Log.',
+    startFailed: 'Mihomo не был запущен. Проверьте Log.',
+    stopFailed: 'Mihomo не был остановлен. Проверьте Log.',
+    logCleared: 'Лог очищен',
+    working: 'Операция выполняется. Статус обновляется автоматически.',
     subscriptionSaved: 'Подписка сохранена',
     localEnabled: 'Локальный конфиг включён',
     routingUpdated: 'Routing обновлён',
@@ -136,6 +145,8 @@ const messages = {
     routingTableTitle: 'LAN devices for routing',
     removeDevice: 'Remove from list',
     addDelete: 'Add / Delete',
+    selectKnownDevice: 'Select a device',
+    manualAddress: 'Manual IP/CIDR',
     hostname: 'Name',
     macAddress: 'MAC',
     addIp: 'Add IP',
@@ -157,6 +168,7 @@ const messages = {
     updateApp: 'Update app',
     restartWeb: 'Restart Web',
     refreshLog: 'Refresh log',
+    clearLog: 'Clear log',
     emptyLog: 'Log is empty.',
     done: 'Done',
     actionQueued: 'Command sent to the router',
@@ -164,6 +176,12 @@ const messages = {
     configSaved: 'Config saved',
     modeApplied: 'Mode applied',
     modePending: 'Proxy mode was not applied. Check Log.',
+    operationPending: 'The operation did not finish. Check Log.',
+    operationFailed: 'The operation failed. Check Log.',
+    startFailed: 'Mihomo did not start. Check Log.',
+    stopFailed: 'Mihomo did not stop. Check Log.',
+    logCleared: 'Log cleared',
+    working: 'Operation in progress. Status refreshes automatically.',
     subscriptionSaved: 'Subscription saved',
     localEnabled: 'Local config enabled',
     routingUpdated: 'Routing updated',
@@ -200,6 +218,22 @@ const toast = reactive({ text: '', error: false, visible: false })
 let toastTimer: number | undefined
 const applyingProxyMode = ref(false)
 
+const actionOperations: Record<string, string> = {
+  start: 'core:start',
+  stop: 'core:stop',
+  restart: 'core:restart',
+  'restart-core': 'core:restart',
+  reload: 'core:reload',
+  'reload-config': 'core:reload',
+  'update-core': 'core:update',
+  'update-subscription': 'subscription:update',
+  'update-app': 'web:update',
+  'restart-app': 'web:restart',
+  'routing-apply': 'routing:apply',
+  'mode-apply': 'mode:apply',
+  'clear-log': 'log:clear'
+}
+
 const form = reactive({
   proxyMode: 'tproxy' as ProxyMode,
   routingMode: 'exclude' as RoutingMode,
@@ -207,6 +241,7 @@ const form = reactive({
   subscriptionHours: 1,
   hwidEnabled: true,
   scanLocal: false,
+  knownDeviceIp: '',
   manualIp: ''
 })
 
@@ -221,6 +256,7 @@ const runningText = computed(() => (status.value?.running ? t('running') : t('st
 const recentLog = computed(() => logText.value.split(/\r?\n/).slice(-180).join('\n') || t('emptyLog'))
 const selectedCount = computed(() => selectedIps.value.length)
 const routingHint = computed(() => (form.routingMode === 'include' ? t('includeHint') : t('excludeHint')))
+const operationText = computed(() => (busy.value ? t('working') : ''))
 
 const yamlResult = computed(() => {
   if (!configText.value.trim()) return { error: '', warning: '', doc: null }
@@ -241,15 +277,18 @@ const yamlStateText = computed(() => {
 })
 
 const deviceRows = computed(() => {
-  const rows = new Map<string, LanDevice>()
+  const known = new Map<string, LanDevice>()
   for (const device of status.value?.lanDevices || []) {
-    if (device.ip) rows.set(device.ip, device)
+    if (device.ip) known.set(device.ip, device)
   }
-  for (const ip of selectedIps.value) {
-    if (!rows.has(ip)) rows.set(ip, { ip, mac: '', name: 'manual' })
-  }
-  return Array.from(rows.values()).sort((a, b) => ipSortKey(a.ip).localeCompare(ipSortKey(b.ip)))
+  return selectedIps.value
+    .map((ip) => known.get(ip) || { ip, mac: '', name: '' })
+    .sort((a, b) => ipSortKey(a.ip).localeCompare(ipSortKey(b.ip)))
 })
+
+const availableDevices = computed(() => (status.value?.lanDevices || [])
+  .filter((device) => device.ip && !isSelected(device.ip))
+  .sort((a, b) => ipSortKey(a.ip).localeCompare(ipSortKey(b.ip))))
 
 function ipSortKey(ip: string) {
   return ip.replace(/\d+/g, (part) => part.padStart(3, '0'))
@@ -334,27 +373,51 @@ async function refreshLog() {
 
 const delay = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds))
 
-async function waitForStatus(predicate: (next: StatusResponse) => boolean, attempts = 12) {
+async function waitForOperation(name: string, previousId: string, attempts = 40): Promise<OperationState | null> {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    await delay(1000)
-    await refreshStatus()
-    if (status.value && predicate(status.value)) return true
+    await delay(500)
+    const next = await getStatus()
+    fill(next)
+    const operation = next.operation
+    if (operation.name === name && operation.id !== previousId && operation.state !== 'running') {
+      return operation
+    }
   }
-  return false
+  return null
+}
+
+async function runManagedAction(action: string, attempts = 40) {
+  const operationName = actionOperations[action]
+  if (!operationName) throw new Error(`Unknown action: ${action}`)
+  const previousId = status.value?.operation.id || ''
+  await runAction(action)
+  const operation = await waitForOperation(operationName, previousId, attempts)
+  if (!operation) throw new Error(t('operationPending'))
+  if (operation.state === 'failed') throw new Error(t('operationFailed'))
 }
 
 async function doAction(action: string) {
   await withBusy(action, async () => {
-    const result = await runAction(action)
+    const attempts = action === 'update-core' || action === 'update-app'
+      ? 360
+      : action === 'update-subscription'
+        ? 180
+        : 50
+    await runManagedAction(action, attempts)
+    await refreshStatus()
     if (action === 'start') {
-      await waitForStatus((next) => next.running)
+      if (!status.value?.running) throw new Error(t('startFailed'))
     } else if (action === 'stop') {
-      await waitForStatus((next) => !next.running)
-    } else {
-      await delay(700)
-      await refreshStatus()
+      if (status.value?.running) throw new Error(t('stopFailed'))
+    } else if (action === 'update-subscription') {
+      if (status.value?.activeConfig !== status.value?.subscriptionConfig) throw new Error(t('subscriptionPending'))
+      await loadConfig()
+      activePage.value = 'config'
+      showToast(t('subscriptionSaved'))
+      await refreshLog().catch(() => undefined)
+      return
     }
-    showToast(result.output || t('actionQueued'))
+    showToast(t('done'))
     if (action !== 'stop') await refreshLog().catch(() => undefined)
   })
 }
@@ -378,8 +441,8 @@ async function doSaveConfigAndAction(action: 'reload-config' | 'restart-core') {
   }
   await withBusy(action, async () => {
     const saved = await saveConfig(configText.value)
-    const applied = await runAction(action)
-    showToast(applied.output || saved.output || t('configSaved'))
+    await runManagedAction(action)
+    showToast(saved.output || t('configSaved'))
     await refreshStatus()
     await refreshLog().catch(() => undefined)
   })
@@ -390,13 +453,9 @@ async function doApplyMode() {
   applyingProxyMode.value = true
   await withBusy('mode', async () => {
     await saveMode(selectedMode)
-    await runAction('mode-apply')
-    if (status.value?.running) {
-      const applied = await waitForStatus((next) => next.running && next.proxyMode === selectedMode)
-      if (!applied) throw new Error(t('modePending'))
-    } else {
-      await refreshStatus()
-    }
+    await runManagedAction('mode-apply')
+    await refreshStatus()
+    if (status.value?.proxyMode !== selectedMode) throw new Error(t('modePending'))
     form.proxyMode = selectedMode
     showToast(t('modeApplied'))
   })
@@ -406,13 +465,12 @@ async function doApplyMode() {
 async function doSaveSubscription() {
   await withBusy('subscription', async () => {
     await saveSubscriptionUrl(form.subscriptionUrl.trim(), Number(form.subscriptionHours) || 1)
-    await runAction('update-subscription')
-    const imported = await waitForStatus((next) => next.activeConfig === next.subscriptionConfig, 35)
-    if (!imported) {
-      showToast(t('subscriptionPending'), true)
-      return
-    }
+    await refreshStatus()
+    await runManagedAction('update-subscription', 180)
+    await refreshStatus()
+    if (status.value?.activeConfig !== status.value?.subscriptionConfig) throw new Error(t('subscriptionPending'))
     await loadConfig()
+    activePage.value = 'config'
     showToast(t('subscriptionSaved'))
   })
 }
@@ -460,10 +518,6 @@ function toggleDevice(ip: string, enabled: boolean) {
   selectedIps.value = selectedIps.value.filter((item) => item !== clean)
 }
 
-function onDeviceChange(ip: string, event: Event) {
-  toggleDevice(ip, (event.target as HTMLInputElement).checked)
-}
-
 function addManualIp() {
   const clean = normalizeIp(form.manualIp)
   if (!validIpOrCidr(clean)) {
@@ -479,16 +533,24 @@ function addManualIp() {
     return
   }
   selectedIps.value = [...selectedIps.value, clean]
+  form.knownDeviceIp = ''
   form.manualIp = ''
 }
 
 async function doSaveRouting() {
   await withBusy('routing', async () => {
     await saveRouting(form.routingMode, selectedIps.value.join('\n'))
-    await runAction('routing-apply')
-    await delay(700)
+    await runManagedAction('routing-apply')
     await refreshStatus()
     showToast(t('routingUpdated'))
+  })
+}
+
+async function clearLog() {
+  await withBusy('clear-log', async () => {
+    await runManagedAction('clear-log')
+    logText.value = ''
+    showToast(t('logCleared'))
   })
 }
 
@@ -515,6 +577,7 @@ onMounted(async () => {
 <template>
   <div id="TopBanner"></div>
   <div id="Loading" class="popup_bg"></div>
+  <iframe name="hidden_frame" id="hidden_frame" class="visually-hidden" title="Mihomo action result"></iframe>
   <form id="ruleForm" method="post" action="/start_apply.htm" target="hidden_frame" @submit.prevent>
     <input type="hidden" name="current_page" :value="currentPage" />
     <input type="hidden" name="next_page" :value="currentPage" />
@@ -550,10 +613,13 @@ onMounted(async () => {
       </div>
     </header>
 
+    <div v-if="busy" class="operation-status" role="status">{{ operationText }}</div>
+
     <nav class="tabbar" aria-label="Mihomo menu">
       <button
         v-for="page in pages"
         :key="page.id"
+        type="button"
         :class="{ active: activePage === page.id }"
         @click="activePage = page.id"
       >
@@ -573,7 +639,7 @@ onMounted(async () => {
             <strong>{{ status?.coreVersion || 'Mihomo' }}</strong>
             <small>{{ status?.coreArchitecture || 'Linux ARM' }}</small>
           </div>
-          <label class="field inline-field">
+          <label class="proxy-control">
             <span>{{ t('proxyMode') }}</span>
             <select v-model="form.proxyMode" :disabled="Boolean(busy)">
               <option value="tproxy">TProxy</option>
@@ -583,7 +649,7 @@ onMounted(async () => {
           </label>
         </div>
         <div class="inline-actions">
-          <button :disabled="Boolean(busy)" @click="doApplyMode">{{ t('apply') }}</button>
+          <button type="button" :disabled="Boolean(busy)" @click="doApplyMode">{{ t('apply') }}</button>
         </div>
       </section>
 
@@ -592,9 +658,9 @@ onMounted(async () => {
           <h2>{{ t('serviceActions') }}</h2>
         </div>
         <div class="action-grid">
-          <button :disabled="Boolean(busy)" @click="doAction('start')">{{ t('start') }}</button>
-          <button :disabled="Boolean(busy)" @click="doAction('stop')">{{ t('stop') }}</button>
-          <button :disabled="!canOpenDashboard" :title="canOpenDashboard ? '' : t('dashboardUnavailable')" @click="openDashboard">{{ t('coreDashboard') }}</button>
+          <button type="button" :disabled="Boolean(busy)" @click="doAction('start')">{{ t('start') }}</button>
+          <button type="button" :disabled="Boolean(busy)" @click="doAction('stop')">{{ t('stop') }}</button>
+          <button type="button" :disabled="!canOpenDashboard" :title="canOpenDashboard ? '' : t('dashboardUnavailable')" @click="openDashboard">{{ t('coreDashboard') }}</button>
         </div>
       </section>
 
@@ -631,11 +697,18 @@ onMounted(async () => {
             </thead>
             <tbody>
               <tr class="device-add-row">
-                <td><span class="manual-label">{{ t('manualIp') }}</span></td>
                 <td>
-                  <input v-model="form.manualIp" placeholder="192.168.50.20" @keydown.enter.prevent="addManualIp" />
+                  <select v-model="form.knownDeviceIp" :disabled="Boolean(busy)" @change="form.manualIp = form.knownDeviceIp">
+                    <option value="">{{ t('selectKnownDevice') }}</option>
+                    <option v-for="device in availableDevices" :key="device.ip" :value="device.ip">
+                      {{ device.name || device.mac || device.ip }} ({{ device.ip }})
+                    </option>
+                  </select>
                 </td>
-                <td></td>
+                <td>
+                  <input v-model="form.manualIp" :placeholder="t('manualAddress')" @keydown.enter.prevent="addManualIp" />
+                </td>
+                <td class="route-cell"><span class="route-chip">{{ form.routingMode === 'include' ? t('include') : t('exclude') }}</span></td>
                 <td class="device-actions">
                   <button type="button" class="icon-button" :disabled="Boolean(busy)" :title="t('addIp')" :aria-label="t('addIp')" @click="addManualIp">+</button>
                 </td>
@@ -651,16 +724,7 @@ onMounted(async () => {
                   </div>
                 </td>
                 <td><code>{{ device.ip }}</code></td>
-                <td class="route-cell">
-                  <label class="route-toggle">
-                    <input
-                      :checked="isSelected(device.ip)"
-                      type="checkbox"
-                      @change="onDeviceChange(device.ip, $event)"
-                    />
-                    <span>{{ isSelected(device.ip) ? t('selected') : '-' }}</span>
-                  </label>
-                </td>
+                <td class="route-cell"><span class="route-chip">{{ form.routingMode === 'include' ? t('include') : t('exclude') }}</span></td>
                 <td class="device-actions">
                   <button
                     type="button"
@@ -681,14 +745,14 @@ onMounted(async () => {
 
         <div class="panel-actions">
           <button type="button" :disabled="Boolean(busy) || selectedCount === 0" @click="selectedIps = []">{{ t('clearSelected') }}</button>
-          <button :disabled="Boolean(busy)" @click="doSaveRouting">{{ t('applyRouting') }}</button>
+          <button type="button" :disabled="Boolean(busy)" @click="doSaveRouting">{{ t('applyRouting') }}</button>
         </div>
       </section>
 
       <section class="panel span-6">
         <div class="panel-head">
           <h2>{{ t('subscriptionSettings') }}</h2>
-          <button :disabled="Boolean(busy)" @click="doAction('update-subscription')">{{ t('updateNow') }}</button>
+          <button type="button" :disabled="Boolean(busy)" @click="doAction('update-subscription')">{{ t('updateNow') }}</button>
         </div>
         <label class="field">
           <span>{{ t('remnawaveUrl') }}</span>
@@ -709,8 +773,8 @@ onMounted(async () => {
           </label>
         </div>
         <div class="inline-actions">
-          <button :disabled="Boolean(busy)" @click="doSaveSubscription">{{ t('saveUrl') }}</button>
-          <button :disabled="Boolean(busy)" @click="doUseLocal">{{ t('useLocal') }}</button>
+          <button type="button" :disabled="Boolean(busy)" @click="doSaveSubscription">{{ t('saveUrl') }}</button>
+          <button type="button" :disabled="Boolean(busy)" @click="doUseLocal">{{ t('useLocal') }}</button>
         </div>
       </section>
 
@@ -719,9 +783,9 @@ onMounted(async () => {
           <h2>{{ t('updateSettings') }}</h2>
         </div>
         <div class="action-grid">
-          <button :disabled="Boolean(busy)" @click="doAction('update-core')">{{ t('updateCore') }}</button>
-          <button :disabled="Boolean(busy)" @click="doAction('update-app')">{{ t('updateApp') }}</button>
-          <button :disabled="Boolean(busy)" @click="doAction('restart-app')">{{ t('restartWeb') }}</button>
+          <button type="button" :disabled="Boolean(busy)" @click="doAction('update-core')">{{ t('updateCore') }}</button>
+          <button type="button" :disabled="Boolean(busy)" @click="doAction('update-app')">{{ t('updateApp') }}</button>
+          <button type="button" :disabled="Boolean(busy)" @click="doAction('restart-app')">{{ t('restartWeb') }}</button>
         </div>
       </section>
     </div>
@@ -731,10 +795,10 @@ onMounted(async () => {
         <h2>{{ t('config') }}</h2>
         <div class="inline-actions">
           <input ref="configFileInput" class="visually-hidden" type="file" accept=".yaml,.yml,text/yaml,text/plain" @change="loadConfigFile" />
-          <button :disabled="Boolean(busy)" @click="openConfigFile">{{ t('loadConfig') }}</button>
-          <button :disabled="Boolean(busy) || Boolean(yamlResult.error)" @click="doSaveConfig">{{ t('saveConfig') }}</button>
-          <button :disabled="Boolean(busy) || Boolean(yamlResult.error)" @click="doSaveConfigAndAction('reload-config')">{{ t('saveReloadConfig') }}</button>
-          <button :disabled="Boolean(busy) || Boolean(yamlResult.error)" @click="doSaveConfigAndAction('restart-core')">{{ t('saveRestartCore') }}</button>
+          <button type="button" :disabled="Boolean(busy)" @click="openConfigFile">{{ t('loadConfig') }}</button>
+          <button type="button" :disabled="Boolean(busy) || Boolean(yamlResult.error)" @click="doSaveConfig">{{ t('saveConfig') }}</button>
+          <button type="button" :disabled="Boolean(busy) || Boolean(yamlResult.error)" @click="doSaveConfigAndAction('reload-config')">{{ t('saveReloadConfig') }}</button>
+          <button type="button" :disabled="Boolean(busy) || Boolean(yamlResult.error)" @click="doSaveConfigAndAction('restart-core')">{{ t('saveRestartCore') }}</button>
         </div>
       </div>
       <YamlEditor v-model="configText" />
@@ -746,7 +810,10 @@ onMounted(async () => {
     <section v-if="activePage === 'logs'" class="panel logs-panel">
       <div class="panel-head">
         <h2>{{ t('logs') }}</h2>
-        <button :disabled="Boolean(busy)" @click="refreshLog">{{ t('refreshLog') }}</button>
+        <div class="inline-actions">
+          <button type="button" :disabled="Boolean(busy)" @click="refreshLog">{{ t('refreshLog') }}</button>
+          <button type="button" :disabled="Boolean(busy)" @click="clearLog">{{ t('clearLog') }}</button>
+        </div>
       </div>
       <pre>{{ recentLog }}</pre>
     </section>

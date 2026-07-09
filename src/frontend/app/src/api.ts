@@ -21,7 +21,8 @@ const merlinActions: Record<string, string> = {
   'update-app': 'mihomo_web_update',
   'restart-app': 'mihomo_web_restart',
   'routing-apply': 'mihomo_routing_apply',
-  'mode-apply': 'mihomo_mode_apply'
+  'mode-apply': 'mihomo_mode_apply',
+  'clear-log': 'mihomo_log_clear'
 }
 
 const endpoint = (op: string, params: Record<string, string | number | boolean> = {}) => {
@@ -80,26 +81,16 @@ export async function runAction(name: string): Promise<CommandResponse> {
   const action = merlinActions[name]
   if (!action) throw new Error(`Unknown action: ${name}`)
 
-  await new Promise<void>((resolve, reject) => {
-    const frameName = `mihomo_action_${Math.random().toString(36).slice(2)}`
-    const frame = document.createElement('iframe')
+  await new Promise<void>((resolve) => {
     const form = document.createElement('form')
-    const timeout = window.setTimeout(() => cleanup(new Error('Router action timed out')), 10_000)
-
-    const cleanup = (error?: Error) => {
-      window.clearTimeout(timeout)
+    const cleanup = () => {
       form.remove()
-      frame.remove()
-      if (error) reject(error)
-      else resolve()
+      resolve()
     }
-
-    frame.name = frameName
-    frame.hidden = true
 
     form.method = 'post'
     form.action = '/start_apply.htm'
-    form.target = frameName
+    form.target = 'hidden_frame'
     for (const [name, value] of Object.entries({
       action_mode: 'apply',
       action_script: action,
@@ -113,9 +104,9 @@ export async function runAction(name: string): Promise<CommandResponse> {
       form.append(input)
     }
 
-    document.body.append(frame, form)
-    frame.addEventListener('load', () => window.setTimeout(() => cleanup(), 250), { once: true })
+    document.body.append(form)
     form.submit()
+    window.setTimeout(cleanup, 250)
   })
 
   return { ok: true }

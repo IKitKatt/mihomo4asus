@@ -14,6 +14,7 @@ ROUTING_MODE_FILE="${ROUTING_MODE_FILE:-$STATE_DIR/routing.mode}"
 PROXY_MODE_FILE="${PROXY_MODE_FILE:-$STATE_DIR/proxy.mode}"
 SUBSCRIPTION_SETTINGS_FILE="${SUBSCRIPTION_SETTINGS_FILE:-$STATE_DIR/subscription.conf}"
 MIHOMO_BIN="${MIHOMO_BIN:-$MIHOMO_HOME/mihomo}"
+LAN_IF="${LAN_IF:-br0}"
 
 headers() {
     printf 'Status: %s\r\n' "${1:-200 OK}"
@@ -89,9 +90,6 @@ json_devices() {
     mkdir -p "$RUN_DIR" 2>/dev/null
     rm -f "$tmp"
 
-    if [ -f /var/lib/misc/dnsmasq.leases ]; then
-        awk '{ print $3 "|" $2 "|" $4 }' /var/lib/misc/dnsmasq.leases >> "$tmp" 2>/dev/null
-    fi
     if command -v nvram >/dev/null 2>&1; then
         nvram get dhcp_staticlist 2>/dev/null | tr '<' '\n' | awk -F'>' 'NF >= 2 {
             mac=$1
@@ -100,13 +98,31 @@ json_devices() {
             if (ip != "") print ip "|" mac "|" name
         }' >> "$tmp" 2>/dev/null
     fi
+    if [ -f /var/lib/misc/dnsmasq.leases ]; then
+        awk '{ print $3 "|" $2 "|" $4 }' /var/lib/misc/dnsmasq.leases >> "$tmp" 2>/dev/null
+    fi
+    if command -v ip >/dev/null 2>&1; then
+        ip neigh show dev "$LAN_IF" 2>/dev/null | awk '$1 ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/ && $5 ~ /^[0-9A-Fa-f:]{17}$/ { print $1 "|" $5 "|" }' >> "$tmp"
+    fi
 
     printf '['
     first=1
     if [ -f "$tmp" ]; then
         awk -F'|' '
-            $1 != "" && !seen[$1]++ {
-                print $1 "|" $2 "|" $3
+            function useful_name(value) {
+                return value != "" && value != "*" && value != "(unknown)"
+            }
+            $1 != "" {
+                ip=$1
+                if (!seen[ip]++) order[++count]=ip
+                if ($2 != "" && mac[ip] == "") mac[ip]=$2
+                if (useful_name($3) && name[ip] == "") name[ip]=$3
+            }
+            END {
+                for (index = 1; index <= count; index++) {
+                    ip=order[index]
+                    print ip "|" mac[ip] "|" name[ip]
+                }
             }
         ' "$tmp" | while IFS='|' read -r ip mac name || [ -n "$ip" ]; do
             [ "$first" = 1 ] || printf ','
@@ -122,6 +138,23 @@ json_devices() {
     fi
     printf ']'
     rm -f "$tmp"
+}
+
+operation_json() {
+    operation_id=""
+    operation_name=""
+    operation_state="idle"
+    if [ -f "$RUN_DIR/action.status" ]; then
+        IFS='|' read -r operation_id operation_name operation_state < "$RUN_DIR/action.status"
+        case "$operation_state" in running|success|failed) ;; *) operation_state=idle ;; esac
+    fi
+    printf '{"id":'
+    json_string "$operation_id"
+    printf ',"name":'
+    json_string "$operation_name"
+    printf ',"state":'
+    json_string "$operation_state"
+    printf '}'
 }
 
 active_config_file() {
@@ -221,6 +254,7 @@ status_json() {
     printf '"coreVersion":'; json_string "$(core_version)"; printf ','
     printf '"coreArchitecture":'; json_string "$(core_architecture)"; printf ','
     printf '"controllerUrl":'; json_string "$(controller_url)"; printf ','
+    printf '"operation":'; operation_json; printf ','
     hwid_enabled="$(setting_value HWID_ENABLED)"
     case "$hwid_enabled" in 0|no|off|false|disabled) hwid_enabled=false ;; *) hwid_enabled=true ;; esac
     printf '"subscription":{"type":'; json_string "$sub_type"; printf ',"url":'; json_string "$(setting_value URL)"; printf ',"hours":%s,' "$sub_hours"

@@ -110,7 +110,7 @@ migrate_config_extras() {
     done
 }
 
-config_file() {
+config_source_file() {
     if [ "$(subscription_type)" = "url" ]; then
         [ -f "$SUB_CONFIG_FILE" ] || return 1
         echo "$SUB_CONFIG_FILE"
@@ -118,6 +118,14 @@ config_file() {
     fi
     [ -f "$CONFIG_FILE" ] || return 1
     echo "$CONFIG_FILE"
+}
+
+config_file() {
+    source_config="$(config_source_file)" || return 1
+    prepare_proxy_provider_runtime_config "$source_config" || {
+        rm -f "$RUNTIME_CONFIG_FILE" 2>/dev/null
+        printf '%s\n' "$source_config"
+    }
 }
 
 is_running() {

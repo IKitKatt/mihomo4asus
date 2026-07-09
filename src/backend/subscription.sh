@@ -245,6 +245,75 @@ subscription_headers() {
     printf '%s\n' "$user_agent"
 }
 
+yaml_flow_value() {
+    printf '%s' "$1" | tr '\r\n' '  ' | sed 's/\\/\\\\/g;s/"/\\"/g'
+}
+
+prepare_proxy_provider_runtime_config() {
+    source_config="$1"
+    [ -f "$source_config" ] || return 1
+    [ "$(subscription_hwid_enabled)" = "1" ] || {
+        rm -f "$RUNTIME_CONFIG_FILE" 2>/dev/null
+        printf '%s\n' "$source_config"
+        return 0
+    }
+    grep -q '^[[:space:]]*proxy-providers:[[:space:]]*' "$source_config" 2>/dev/null || {
+        rm -f "$RUNTIME_CONFIG_FILE" 2>/dev/null
+        printf '%s\n' "$source_config"
+        return 0
+    }
+
+    headers="$(subscription_headers)"
+    hwid="$(printf '%s\n' "$headers" | sed -n '1p' | yaml_flow_value)"
+    device_os="$(printf '%s\n' "$headers" | sed -n '2p' | yaml_flow_value)"
+    ver_os="$(printf '%s\n' "$headers" | sed -n '3p' | yaml_flow_value)"
+    device_model="$(printf '%s\n' "$headers" | sed -n '4p' | yaml_flow_value)"
+    user_agent="$(printf '%s\n' "$headers" | sed -n '5p' | yaml_flow_value)"
+    tmp_config="$RUN_DIR/mihomo-runtime.yaml.$$"
+
+    awk -v user_agent="$user_agent" -v hwid="$hwid" -v device_os="$device_os" -v ver_os="$ver_os" -v device_model="$device_model" '
+        /^[[:space:]]*proxy-providers:[[:space:]]*($|#)/ { in_providers=1 }
+        in_providers && /^[^[:space:]#][^:]*:[[:space:]]*/ && $0 !~ /^[[:space:]]*proxy-providers:/ { in_providers=0 }
+        {
+            line=$0
+            indent=line
+            sub(/[^[:space:]].*$/, "", indent)
+            if (in_providers && line ~ /^[[:space:]]*User-Agent:[[:space:]]*\[[[:space:]]*\][[:space:]]*(#.*)?$/) {
+                print indent "User-Agent: [\"" user_agent "\"]"
+                next
+            }
+            if (in_providers && line ~ /^[[:space:]]*x-hwid:[[:space:]]*\[[[:space:]]*\][[:space:]]*(#.*)?$/) {
+                print indent "x-hwid: [\"" hwid "\"]"
+                next
+            }
+            if (in_providers && line ~ /^[[:space:]]*x-device-os:[[:space:]]*\[[[:space:]]*\][[:space:]]*(#.*)?$/) {
+                print indent "x-device-os: [\"" device_os "\"]"
+                next
+            }
+            if (in_providers && line ~ /^[[:space:]]*x-ver-os:[[:space:]]*\[[[:space:]]*\][[:space:]]*(#.*)?$/) {
+                print indent "x-ver-os: [\"" ver_os "\"]"
+                next
+            }
+            if (in_providers && line ~ /^[[:space:]]*x-device-model:[[:space:]]*\[[[:space:]]*\][[:space:]]*(#.*)?$/) {
+                print indent "x-device-model: [\"" device_model "\"]"
+                next
+            }
+            print line
+        }
+    ' "$source_config" > "$tmp_config" || {
+        rm -f "$tmp_config"
+        return 1
+    }
+
+    if cmp -s "$source_config" "$tmp_config" 2>/dev/null; then
+        rm -f "$tmp_config" "$RUNTIME_CONFIG_FILE"
+        printf '%s\n' "$source_config"
+        return 0
+    fi
+    mv "$tmp_config" "$RUNTIME_CONFIG_FILE" || return 1
+    printf '%s\n' "$RUNTIME_CONFIG_FILE"
+}
+
 curl_subscription_to_file() {
     curl_bin="$1"
     hdr_file="$2"
@@ -333,7 +402,6 @@ http_get_subscription_to_file() {
             scan_port="${scan_target##*:}"
             if curl_subscription_to_file "$curl_bin" "$hdr_file" "$err_file" "$dst" "$url" "$host:$port:$scan_ip:$scan_port" 1 4 "$user_agent" "$accept_header" "$hwid" "$device_os" "$ver_os" "$device_model" && subscription_response_valid "$dst"; then
                 log "subscription recovered from local address: $scan_target"
-                capture_subscription_profile_interval "$hdr_file"
                 rm -f "$err_file" "$hdr_file"
                 return 0
             fi
