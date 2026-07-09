@@ -25,6 +25,10 @@ die() {
     exit 1
 }
 
+INSTALLER_DIR="$(CDPATH= cd "$(dirname "$0")" 2>/dev/null && pwd)" || die "cannot resolve installer directory"
+LOCAL_SOURCE_DIR="${LOCAL_SOURCE_DIR:-$INSTALLER_DIR}"
+LOCAL_SOURCES_NOTICE=0
+
 download_to_file() {
     url="$1"
     dst="$2"
@@ -54,13 +58,23 @@ copy_or_download() {
     src="$1"
     dst="$2"
     mkdir -p "$(dirname "$dst")" || die "cannot create $(dirname "$dst")"
-    if [ -f "$src" ]; then
-        src_dir="$(CDPATH= cd -- "$(dirname -- "$src")" 2>/dev/null && pwd)" || die "cannot resolve source directory for $src"
-        dst_dir="$(CDPATH= cd -- "$(dirname -- "$dst")" 2>/dev/null && pwd)" || die "cannot resolve destination directory for $dst"
-        if [ "$src_dir/$(basename -- "$src")" = "$dst_dir/$(basename -- "$dst")" ]; then
+    if [ -d "$LOCAL_SOURCE_DIR/src" ]; then
+        if [ "$LOCAL_SOURCES_NOTICE" -eq 0 ]; then
+            echo "Using local application sources from $LOCAL_SOURCE_DIR/src"
+            LOCAL_SOURCES_NOTICE=1
+        fi
+        local_src="$LOCAL_SOURCE_DIR/$src"
+        [ -f "$local_src" ] || die "missing local source file: $local_src"
+    else
+        local_src="$src"
+    fi
+    if [ -f "$local_src" ]; then
+        src_dir="$(CDPATH= cd "$(dirname "$local_src")" 2>/dev/null && pwd)" || die "cannot resolve source directory for $local_src"
+        dst_dir="$(CDPATH= cd "$(dirname "$dst")" 2>/dev/null && pwd)" || die "cannot resolve destination directory for $dst"
+        if [ "$src_dir/$(basename "$local_src")" = "$dst_dir/$(basename "$dst")" ]; then
             return 0
         fi
-        cp "$src" "$dst" || die "cannot copy $src"
+        cp "$local_src" "$dst" || die "cannot copy $local_src"
     else
         download_to_file "$RAW_BASE/$src" "$dst" || die "cannot download $RAW_BASE/$src"
     fi
