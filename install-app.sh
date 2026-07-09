@@ -165,8 +165,6 @@ mixed-port: 7890
 tproxy-port: 7894
 find-process-mode: off
 external-controller: 0.0.0.0:9090
-external-ui-url: https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip
-external-ui-name: metacubexd
 
 dns:
   enable: true

@@ -32,7 +32,7 @@ const messages = {
     start: 'Запустить',
     stop: 'Остановить',
     coreDashboard: 'Панель ядра',
-    dashboardUnavailable: 'В config.yaml не указан external-controller',
+    dashboardUnavailable: 'В активном конфиге не указан external-controller',
     serviceActions: 'Сервис',
     coreVersion: 'Версия ядра',
     saveConfig: 'Сохранить',
@@ -54,6 +54,10 @@ const messages = {
     select: 'Выбор',
     client: 'Устройство (MAC)',
     ipAddress: 'IP адрес',
+    routeDevice: 'Направлять через Mihomo',
+    routingTableTitle: 'Устройства LAN для маршрутизации',
+    removeDevice: 'Убрать из списка',
+    addDelete: 'Добавить / удалить',
     hostname: 'Имя',
     macAddress: 'MAC',
     addIp: 'Добавить IP',
@@ -81,6 +85,7 @@ const messages = {
     subscriptionPending: 'Импорт подписки не завершился. Проверьте Log.',
     configSaved: 'Конфиг сохранён',
     modeApplied: 'Режим применён',
+    modePending: 'Режим не был применён. Проверьте Log.',
     subscriptionSaved: 'Подписка сохранена',
     localEnabled: 'Локальный конфиг включён',
     routingUpdated: 'Routing обновлён',
@@ -105,7 +110,7 @@ const messages = {
     start: 'Start',
     stop: 'Stop',
     coreDashboard: 'Core Dashboard',
-    dashboardUnavailable: 'external-controller is not set in config.yaml',
+    dashboardUnavailable: 'external-controller is not set in the active config',
     serviceActions: 'Service',
     coreVersion: 'Core version',
     saveConfig: 'Save',
@@ -127,6 +132,10 @@ const messages = {
     select: 'Select',
     client: 'Client (MAC)',
     ipAddress: 'IP address',
+    routeDevice: 'Route through Mihomo',
+    routingTableTitle: 'LAN devices for routing',
+    removeDevice: 'Remove from list',
+    addDelete: 'Add / Delete',
     hostname: 'Name',
     macAddress: 'MAC',
     addIp: 'Add IP',
@@ -154,6 +163,7 @@ const messages = {
     subscriptionPending: 'Subscription import did not finish. Check Log.',
     configSaved: 'Config saved',
     modeApplied: 'Mode applied',
+    modePending: 'Proxy mode was not applied. Check Log.',
     subscriptionSaved: 'Subscription saved',
     localEnabled: 'Local config enabled',
     routingUpdated: 'Routing updated',
@@ -188,6 +198,7 @@ const activePage = ref<Page>(
 const selectedIps = ref<string[]>([])
 const toast = reactive({ text: '', error: false, visible: false })
 let toastTimer: number | undefined
+const applyingProxyMode = ref(false)
 
 const form = reactive({
   proxyMode: 'tproxy' as ProxyMode,
@@ -221,13 +232,7 @@ const yamlResult = computed(() => {
   }
 })
 
-const hasExternalController = computed(() => {
-  if (yamlResult.value.error || !yamlResult.value.doc) return false
-  const value = yamlResult.value.doc.get('external-controller', true)
-  return typeof value === 'string' && value.trim().length > 0
-})
-
-const canOpenDashboard = computed(() => Boolean(status.value?.controllerUrl && hasExternalController.value))
+const canOpenDashboard = computed(() => Boolean(status.value?.controllerUrl))
 
 const yamlStateText = computed(() => {
   if (yamlResult.value.error) return `${t('yamlError')}: ${yamlResult.value.error}`
@@ -270,7 +275,7 @@ function showToast(text: string, error = false) {
 
 function fill(next: StatusResponse) {
   status.value = next
-  form.proxyMode = next.proxyMode || 'tproxy'
+  if (!applyingProxyMode.value) form.proxyMode = next.proxyMode || 'tproxy'
   form.routingMode = next.routingMode === 'include' ? 'include' : 'exclude'
   selectedIps.value = Array.from(new Set(next.routingItems || []))
   form.subscriptionUrl = next.subscription?.url || ''
@@ -381,13 +386,21 @@ async function doSaveConfigAndAction(action: 'reload-config' | 'restart-core') {
 }
 
 async function doApplyMode() {
+  const selectedMode = form.proxyMode
+  applyingProxyMode.value = true
   await withBusy('mode', async () => {
-    await saveMode(form.proxyMode)
+    await saveMode(selectedMode)
     await runAction('mode-apply')
-    await delay(700)
-    await refreshStatus()
+    if (status.value?.running) {
+      const applied = await waitForStatus((next) => next.running && next.proxyMode === selectedMode)
+      if (!applied) throw new Error(t('modePending'))
+    } else {
+      await refreshStatus()
+    }
+    form.proxyMode = selectedMode
     showToast(t('modeApplied'))
   })
+  applyingProxyMode.value = false
 }
 
 async function doSaveSubscription() {
@@ -480,15 +493,12 @@ async function doSaveRouting() {
 }
 
 function openDashboard() {
-  if (!hasExternalController.value) {
+  const url = status.value?.controllerUrl
+  if (!url) {
     showToast(t('dashboardUnavailable'), true)
     return
   }
-  if (status.value?.controllerUrl) {
-    window.open(status.value.controllerUrl, '_blank', 'noopener')
-  } else {
-    showToast(t('dashboardUnavailable'), true)
-  }
+  window.open(url, '_blank', 'noopener,noreferrer')
 }
 
 onMounted(async () => {
@@ -558,9 +568,10 @@ onMounted(async () => {
           <span class="badge" :class="runningClass">{{ runningText }}</span>
         </div>
         <div class="status-facts">
-          <div>
+          <div class="core-version">
             <span>{{ t('coreVersion') }}</span>
-            <strong>{{ status?.coreVersion || 'unknown' }}</strong>
+            <strong>{{ status?.coreVersion || 'Mihomo' }}</strong>
+            <small>{{ status?.coreArchitecture || 'Linux ARM' }}</small>
           </div>
           <label class="field inline-field">
             <span>{{ t('proxyMode') }}</span>
@@ -607,34 +618,29 @@ onMounted(async () => {
           </label>
         </div>
 
-        <div class="manual-row">
-          <label class="field inline-field">
-            <span>{{ t('manualIp') }}</span>
-            <input v-model="form.manualIp" placeholder="192.168.50.20" @keydown.enter.prevent="addManualIp" />
-          </label>
-          <button :disabled="Boolean(busy)" @click="addManualIp">{{ t('addIp') }}</button>
-          <button :disabled="Boolean(busy) || selectedCount === 0" @click="selectedIps = []">{{ t('clearSelected') }}</button>
-        </div>
-
         <div class="table-wrap">
           <table class="device-table">
+            <caption>{{ t('routingTableTitle') }} ({{ t('maxLimit') }})</caption>
             <thead>
               <tr>
-                <th>{{ t('select') }}</th>
                 <th>{{ t('client') }}</th>
                 <th>{{ t('ipAddress') }}</th>
-                <th>{{ t('selected') }}</th>
+                <th>{{ t('routeDevice') }}</th>
+                <th>{{ t('addDelete') }}</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="device in deviceRows" :key="device.ip" :class="{ selected: isSelected(device.ip) }">
+              <tr class="device-add-row">
+                <td><span class="manual-label">{{ t('manualIp') }}</span></td>
                 <td>
-                  <input
-                    :checked="isSelected(device.ip)"
-                    type="checkbox"
-                    @change="onDeviceChange(device.ip, $event)"
-                  />
+                  <input v-model="form.manualIp" placeholder="192.168.50.20" @keydown.enter.prevent="addManualIp" />
                 </td>
+                <td></td>
+                <td class="device-actions">
+                  <button type="button" class="icon-button" :disabled="Boolean(busy)" :title="t('addIp')" :aria-label="t('addIp')" @click="addManualIp">+</button>
+                </td>
+              </tr>
+              <tr v-for="device in deviceRows" :key="device.ip" :class="{ selected: isSelected(device.ip) }">
                 <td>
                   <div class="device-client">
                     <span class="device-avatar">{{ (device.name || device.ip).slice(0, 1).toUpperCase() }}</span>
@@ -645,7 +651,26 @@ onMounted(async () => {
                   </div>
                 </td>
                 <td><code>{{ device.ip }}</code></td>
-                <td>{{ isSelected(device.ip) ? t('selected') : '-' }}</td>
+                <td class="route-cell">
+                  <label class="route-toggle">
+                    <input
+                      :checked="isSelected(device.ip)"
+                      type="checkbox"
+                      @change="onDeviceChange(device.ip, $event)"
+                    />
+                    <span>{{ isSelected(device.ip) ? t('selected') : '-' }}</span>
+                  </label>
+                </td>
+                <td class="device-actions">
+                  <button
+                    type="button"
+                    class="icon-button remove"
+                    :disabled="Boolean(busy) || !isSelected(device.ip)"
+                    :title="t('removeDevice')"
+                    :aria-label="t('removeDevice')"
+                    @click="toggleDevice(device.ip, false)"
+                  >-</button>
+                </td>
               </tr>
               <tr v-if="deviceRows.length === 0">
                 <td colspan="4" class="empty-cell">{{ t('noDevices') }}</td>
@@ -655,7 +680,7 @@ onMounted(async () => {
         </div>
 
         <div class="panel-actions">
-          <span class="hint">{{ t('maxLimit') }}</span>
+          <button type="button" :disabled="Boolean(busy) || selectedCount === 0" @click="selectedIps = []">{{ t('clearSelected') }}</button>
           <button :disabled="Boolean(busy)" @click="doSaveRouting">{{ t('applyRouting') }}</button>
         </div>
       </section>

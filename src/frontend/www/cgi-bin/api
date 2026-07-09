@@ -147,13 +147,34 @@ controller_url() {
     host="${addr%:*}"
     port="${addr##*:}"
     case "$port" in ''|*[!0-9]*) return 0 ;; esac
-    case "$host" in 0.0.0.0|::|127.0.0.1|"") host="${HTTP_HOST%%:*}" ;; esac
+    case "$host" in
+        0.0.0.0|::|127.0.0.1|"")
+            host="${HTTP_HOST%%:*}"
+            if [ -z "$host" ] && command -v nvram >/dev/null 2>&1; then
+                host="$(nvram get lan_ipaddr 2>/dev/null)"
+            fi
+            [ -n "$host" ] || host="router.asus.com"
+            ;;
+    esac
     printf 'http://%s:%s/ui/' "$host" "$port"
 }
 
 core_version() {
     [ -x "$MIHOMO_BIN" ] || return 0
-    "$MIHOMO_BIN" -v 2>/dev/null | head -n 1
+    "$MIHOMO_BIN" -v 2>/dev/null | awk '
+        NR == 1 {
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^v[0-9]/) {
+                    print "Mihomo " $i
+                    exit
+                }
+            }
+        }
+    '
+}
+
+core_architecture() {
+    printf '%s\n' 'Linux ARM'
 }
 
 is_running() {
@@ -198,6 +219,7 @@ status_json() {
     printf '"subscriptionConfig":'; json_string "$SUB_CONFIG_FILE"; printf ','
     printf '"logFile":'; json_string "$LOG_FILE"; printf ','
     printf '"coreVersion":'; json_string "$(core_version)"; printf ','
+    printf '"coreArchitecture":'; json_string "$(core_architecture)"; printf ','
     printf '"controllerUrl":'; json_string "$(controller_url)"; printf ','
     hwid_enabled="$(setting_value HWID_ENABLED)"
     case "$hwid_enabled" in 0|no|off|false|disabled) hwid_enabled=false ;; *) hwid_enabled=true ;; esac

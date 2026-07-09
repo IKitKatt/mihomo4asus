@@ -25,151 +25,6 @@ stop_subscription_updater() {
     rm -f "$SUBSCRIPTION_PID_FILE"
 }
 
-sanitize_subscription_config() {
-    file="$1"
-    dns_proxy_names="$RUN_DIR/subscription-dns-proxies.$$"
-
-    remove_top_level_block tun "$file"
-    remove_top_level_block lan-allowed-ips "$file"
-    remove_top_level_key bind-address "$file"
-    remove_top_level_key mixed-port "$file"
-    remove_top_level_key find-process-mode "$file"
-    replace_top_level_key find-process-mode "find-process-mode: off" "$file"
-    remove_block_key_value dns enhanced-mode fake-ip "$file"
-    remove_block_keys dns "$file" prefer-h3 fake-ip-range fake-ip-filter
-    remove_dns_proxy_entries "$file" "$dns_proxy_names"
-    remove_rules_for_names "$file" "$dns_proxy_names"
-    rm -f "$dns_proxy_names"
-}
-
-move_operational_keys_to_top() {
-    file="$1"
-    keys="tproxy-port find-process-mode external-controller secret external-controller-cors external-controller-unix external-controller-tls external-ui external-ui-name external-ui-url"
-    tmp_top="$file.top.$$"
-    tmp_body="$file.body.$$"
-    tmp_out="$file.out.$$"
-
-    : > "$tmp_top" || return 1
-    line="$(top_level_line mode "$file")"
-    [ -n "$line" ] && printf '%s\n' "$line" >> "$tmp_top"
-    for key in $keys; do
-        line="$(top_level_line "$key" "$file")"
-        [ -n "$line" ] && printf '%s\n' "$line" >> "$tmp_top"
-    done
-
-    awk -v keys="mode $keys" '
-        function key_match(key) {
-            return (" " keys " ") ~ (" " key " ")
-        }
-        /^[^[:space:]#][^:]*:[[:space:]]*/ {
-            key=$0
-            sub(/:.*/, "", key)
-            if (key_match(key)) next
-        }
-        { print }
-    ' "$file" > "$tmp_body" || {
-        rm -f "$tmp_top" "$tmp_body" "$tmp_out"
-        return 1
-    }
-
-    if [ -s "$tmp_top" ]; then
-        {
-            cat "$tmp_top"
-            printf '\n'
-            cat "$tmp_body"
-        } > "$tmp_out" || {
-            rm -f "$tmp_top" "$tmp_body" "$tmp_out"
-            return 1
-        }
-        mv "$tmp_out" "$file"
-    fi
-    rm -f "$tmp_top" "$tmp_body" "$tmp_out"
-}
-
-replace_dns_listen() {
-    listen_line="$1"
-    file="$2"
-    tmp="$file.dns.$$"
-
-    awk -v listen_line="$listen_line" '
-        /^dns:[[:space:]]*($|#)/ {
-            in_dns=1
-            saw_dns=1
-            print
-            next
-        }
-        in_dns && /^[^[:space:]#][^:]*:[[:space:]]*/ {
-            if (!listen_done) print listen_line
-            in_dns=0
-        }
-        in_dns && /^[[:space:]]+listen:[[:space:]]*/ {
-            if (!listen_done) print listen_line
-            listen_done=1
-            next
-        }
-        { print }
-        END {
-            if (in_dns && !listen_done) print listen_line
-            if (!saw_dns) {
-                print ""
-                print "dns:"
-                print listen_line
-            }
-        }
-    ' "$file" > "$tmp" && mv "$tmp" "$file"
-}
-
-preserve_operational_config() {
-    base_file="$1"
-    target_file="$2"
-    tmp_block="$RUN_DIR/preserved-block.$$"
-
-    if [ -f "$base_file" ]; then
-        line="$(top_level_line tproxy-port "$base_file")"
-        [ -n "$line" ] && replace_top_level_key tproxy-port "$line" "$target_file"
-
-        for key in external-controller external-controller-cors external-controller-unix external-controller-tls secret external-ui external-ui-name external-ui-url; do
-            line="$(top_level_line "$key" "$base_file")"
-            if [ -n "$line" ]; then
-                replace_top_level_key "$key" "$line" "$target_file"
-            else
-                remove_top_level_key "$key" "$target_file"
-            fi
-        done
-
-        if has_top_level_block sniffer "$base_file"; then
-            extract_top_level_block sniffer "$base_file" > "$tmp_block"
-            replace_top_level_block sniffer "$tmp_block" "$target_file"
-            rm -f "$tmp_block"
-        else
-            remove_top_level_block sniffer "$target_file"
-        fi
-
-        if has_top_level_block dns "$base_file" && ! has_top_level_block dns "$target_file"; then
-            extract_top_level_block dns "$base_file" > "$tmp_block"
-            replace_top_level_block dns "$tmp_block" "$target_file"
-            rm -f "$tmp_block"
-        fi
-
-        listen="$(yaml_block_value dns listen "$base_file")"
-        if [ -n "$listen" ]; then
-            replace_dns_listen "  listen: $listen" "$target_file"
-        fi
-    else
-        for key in external-controller external-controller-cors external-controller-unix external-controller-tls secret external-ui external-ui-name external-ui-url; do
-            remove_top_level_key "$key" "$target_file"
-        done
-        remove_top_level_block sniffer "$target_file"
-    fi
-
-    if ! has_top_level_key tproxy-port "$target_file"; then
-        replace_top_level_key tproxy-port "tproxy-port: 7894" "$target_file"
-    fi
-    if [ -z "$(yaml_block_value dns listen "$target_file")" ]; then
-        replace_dns_listen "  listen: 0.0.0.0:$DNS_PORT" "$target_file"
-    fi
-}
-
 log_subscription_network_info() {
     url="$1"
     host="$(url_host "$url")"
@@ -390,36 +245,6 @@ subscription_headers() {
     printf '%s\n' "$user_agent"
 }
 
-subscription_profile_update_interval() {
-    headers_file="$1"
-    [ -s "$headers_file" ] || return 1
-    awk -F: '
-        BEGIN { value="" }
-        tolower($1) == "profile-update-interval" {
-            line=$0
-            sub(/^[^:]*:[[:space:]]*/, "", line)
-            sub(/\r$/, "", line)
-            sub(/[[:space:]].*$/, "", line)
-            if (line ~ /^[0-9]+$/ && line > 0) value=line
-        }
-        END {
-            if (value != "") {
-                print value
-                exit 0
-            }
-            exit 1
-        }
-    ' "$headers_file"
-}
-
-capture_subscription_profile_interval() {
-    headers_file="$1"
-    interval="$(subscription_profile_update_interval "$headers_file" 2>/dev/null)"
-    if [ -n "$interval" ]; then
-        printf '%s\n' "$interval" > "$SUBSCRIPTION_PROFILE_INTERVAL_FILE" 2>/dev/null
-    fi
-}
-
 curl_subscription_to_file() {
     curl_bin="$1"
     hdr_file="$2"
@@ -471,7 +296,7 @@ http_get_subscription_to_file() {
     user_agent="$(printf '%s\n' "$headers" | sed -n '5p')"
     accept_header="Accept: application/json, text/plain, */*"
 
-    rm -f "$dst" "$err_file" "$hdr_file" "$SUBSCRIPTION_PROFILE_INTERVAL_FILE"
+    rm -f "$dst" "$err_file" "$hdr_file"
     log_subscription_network_info "$(mask_url_for_log "$url")"
 
     curl_bin="$(find_command_path curl 2>/dev/null)"
@@ -481,7 +306,6 @@ http_get_subscription_to_file() {
     }
 
     if curl_subscription_to_file "$curl_bin" "$hdr_file" "$err_file" "$dst" "$url" "" "$SUBSCRIPTION_CONNECT_TIMEOUT" "$SUBSCRIPTION_MAX_TIME" "$user_agent" "$accept_header" "$hwid" "$device_os" "$ver_os" "$device_model" && subscription_response_valid "$dst"; then
-        capture_subscription_profile_interval "$hdr_file"
         rm -f "$err_file" "$hdr_file"
         return 0
     fi
@@ -644,20 +468,6 @@ save_subscription_settings() {
     chmod 600 "$SUBSCRIPTION_SETTINGS_FILE" 2>/dev/null
 }
 
-apply_subscription_profile_interval() {
-    [ -s "$SUBSCRIPTION_PROFILE_INTERVAL_FILE" ] || return 0
-    interval="$(cat "$SUBSCRIPTION_PROFILE_INTERVAL_FILE" 2>/dev/null | sed 's/\r$//')"
-    case "$interval" in
-        ''|*[!0-9]*) return 0 ;;
-    esac
-    [ "$interval" -gt 0 ] 2>/dev/null || return 0
-    current_interval="$(subscription_update_hours)"
-    if [ "$interval" != "$current_interval" ]; then
-        save_subscription_settings url "$(subscription_setting url)" "$interval"
-        log "subscription update interval set from profile-update-interval: ${interval}h"
-    fi
-}
-
 subscription_is_due() {
     hours="$(subscription_update_hours)"
     seconds=$((hours * 3600))
@@ -687,40 +497,32 @@ subscription_update_config() {
     [ -n "$subscription_url" ] || return 2
 
     tmp_raw="$RUN_DIR/subscription.raw.$$"
-    tmp_merged="$RUN_DIR/subscription.merged.$$"
 
-    rm -f "$tmp_raw" "$tmp_merged"
+    rm -f "$tmp_raw"
     log "requesting subscription config"
     if ! http_get_subscription_to_file "$subscription_url" "$tmp_raw"; then
-        rm -f "$tmp_raw" "$tmp_merged"
+        rm -f "$tmp_raw"
         log "ERROR: subscription download failed"
         return 3
     fi
-    apply_subscription_profile_interval
     [ -s "$tmp_raw" ] || {
-        rm -f "$tmp_raw" "$tmp_merged"
+        rm -f "$tmp_raw"
         log "ERROR: subscription response is empty"
         return 3
     }
 
-    # Store the provider response verbatim. Operational settings are managed
-    # separately and must never be injected into or removed from a subscription.
-    mv "$tmp_raw" "$tmp_merged" || {
-        rm -f "$tmp_raw" "$tmp_merged"
-        log "ERROR: cannot prepare subscription config"
-        return 3
-    }
-
-    if [ -f "$SUB_CONFIG_FILE" ] && cmp -s "$SUB_CONFIG_FILE" "$tmp_merged" 2>/dev/null; then
-        rm -f "$tmp_raw" "$tmp_merged"
+    # The temporary file is the decoded HTTP response body. Do not parse,
+    # normalize, merge, or otherwise modify it before making it active.
+    if [ -f "$SUB_CONFIG_FILE" ] && cmp -s "$SUB_CONFIG_FILE" "$tmp_raw" 2>/dev/null; then
+        rm -f "$tmp_raw"
         touch_subscription_last
         log "subscription config unchanged"
         return 1
     fi
 
     [ -f "$SUB_CONFIG_FILE" ] && cp "$SUB_CONFIG_FILE" "$SUB_CONFIG_FILE.bak" 2>/dev/null
-    mv "$tmp_merged" "$SUB_CONFIG_FILE" || {
-        rm -f "$tmp_raw" "$tmp_merged"
+    mv "$tmp_raw" "$SUB_CONFIG_FILE" || {
+        rm -f "$tmp_raw"
         log "ERROR: cannot install subscription config"
         return 3
     }

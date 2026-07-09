@@ -108,6 +108,7 @@
 #app .status-facts span,
 #app .field span { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
 #app .status-facts strong { overflow-wrap: anywhere; }
+#app .core-version small { color: var(--muted); font-family: monospace; font-size: 12px; }
 #app .field { margin: 12px 0; }
 #app .field.compact { max-width: 240px; }
 #app .inline-field { margin: 0; }
@@ -144,17 +145,32 @@
 #app .segmented label.active { border-color: var(--accent); color: var(--accent); }
 #app .switch-control input,
 #app .segmented input,
-#app .device-table input { width: auto; min-height: auto; padding: 0; }
+#app .device-table input[type='checkbox'] { width: auto; min-height: auto; padding: 0; }
 
-#app .manual-row { display: grid; grid-template-columns: minmax(220px, 360px) auto auto; align-items: end; gap: 8px; margin: 12px 0; }
 #app .subscription-options { display: grid; gap: 8px; margin: 12px 0; }
 #app .subscription-options .switch-control { width: 100%; }
 
 #app .table-wrap { overflow: auto; border: 1px solid var(--border); }
 #app .device-table { width: 100%; min-width: 640px; border-collapse: collapse; }
+#app .device-table caption {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: #66767a;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: left;
+}
 #app .device-table th,
 #app .device-table td { padding: 8px 10px; border: 1px solid var(--border); text-align: left; vertical-align: middle; }
 #app .device-table th { background: #2f3c40; color: var(--text); font-size: 11px; text-transform: uppercase; }
+#app .device-table th:nth-child(1) { width: 42%; }
+#app .device-table th:nth-child(2) { width: 20%; }
+#app .device-table th:nth-child(3) { width: 24%; }
+#app .device-table th:nth-child(4) { width: 14%; text-align: center; }
+#app .device-add-row td { background: #45585d; }
+#app .device-add-row input { width: 100%; min-height: 30px; padding: 5px 8px; }
+#app .manual-label { color: var(--muted); font-size: 12px; font-weight: 700; }
 #app .device-table tr.selected td { background: #56696d; }
 #app .device-table code { color: var(--text); font-weight: 700; }
 #app .device-client { display: flex; align-items: center; gap: 9px; min-width: 210px; }
@@ -171,6 +187,24 @@
   color: #fff;
   font-weight: 700;
 }
+#app .route-cell,
+#app .device-actions { text-align: center !important; }
+#app .route-toggle { display: inline-flex; align-items: center; gap: 7px; color: var(--text); font-size: 12px; }
+#app .icon-button {
+  display: inline-grid;
+  width: 28px;
+  min-height: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0;
+  border-radius: 50%;
+  background: #6d8085;
+  color: #fff;
+  font-size: 21px;
+  font-weight: 400;
+  line-height: 1;
+}
+#app .icon-button.remove { background: #55666b; }
 #app .empty-cell { color: var(--muted); text-align: center; }
 
 #app .config-panel { min-height: 710px; }
@@ -208,7 +242,6 @@
   #app .span-8,
   #app .span-12 { grid-column: 1 / -1; }
   #app .status-facts { grid-template-columns: 1fr; }
-  #app .manual-row { grid-template-columns: 1fr; }
   #app .config-panel,
   #app .logs-panel { min-height: 590px; height: 590px; }
   #app .yaml-editor { height: 520px; }

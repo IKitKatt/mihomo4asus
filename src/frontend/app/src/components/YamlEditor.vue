@@ -4,6 +4,8 @@ import { basicSetup, EditorView } from 'codemirror'
 import { yaml } from '@codemirror/lang-yaml'
 import { indentLess, indentMore } from '@codemirror/commands'
 import { keymap } from '@codemirror/view'
+import { syntaxHighlighting, HighlightStyle } from '@codemirror/language'
+import { tags } from '@lezer/highlight'
 
 const props = defineProps<{
   modelValue: string
@@ -22,19 +24,57 @@ const theme = EditorView.theme({
   '&': {
     height: '100%',
     fontSize: '12px',
-    borderRadius: '6px'
+    borderRadius: '4px',
+    backgroundColor: '#1f272a',
+    color: '#d7dedf'
   },
   '.cm-scroller': {
     fontFamily: '"Cascadia Mono", "SFMono-Regular", Consolas, monospace',
     lineHeight: '1.45'
   },
   '.cm-content': {
-    minHeight: '100%'
+    minHeight: '100%',
+    caretColor: '#f4f6f6'
   },
   '.cm-gutters': {
-    borderRadius: '6px 0 0 6px'
+    border: '0',
+    borderRight: '1px solid #3a494e',
+    backgroundColor: '#273337',
+    color: '#819094'
+  },
+  '.cm-lineNumbers .cm-gutterElement': {
+    minWidth: '38px',
+    padding: '0 8px 0 6px',
+    color: '#819094'
+  },
+  '.cm-activeLineGutter': {
+    backgroundColor: '#324044',
+    color: '#c8d0d2'
+  },
+  '.cm-activeLine': {
+    backgroundColor: '#263236'
+  },
+  '.cm-selectionBackground, &.cm-focused .cm-selectionBackground, ::selection': {
+    backgroundColor: '#46575b !important'
+  },
+  '.cm-cursor, .cm-dropCursor': {
+    borderLeftColor: '#f4f6f6'
+  },
+  '.cm-matchingBracket': {
+    backgroundColor: '#485a5f',
+    outline: '0'
   }
-})
+}, { dark: true })
+
+const highlighting = HighlightStyle.define([
+  { tag: [tags.keyword, tags.bool, tags.null], color: '#d8b255' },
+  { tag: tags.propertyName, color: '#d7dedf' },
+  { tag: tags.string, color: '#bddb9a' },
+  { tag: tags.number, color: '#dfa96a' },
+  { tag: tags.comment, color: '#77878b', fontStyle: 'italic' },
+  { tag: tags.punctuation, color: '#bdc8ca' },
+  { tag: tags.atom, color: '#c7a8d9' }
+])
 
 function selectedLineNumbers() {
   if (!view) return []
@@ -130,6 +170,7 @@ onMounted(() => {
       EditorView.lineWrapping,
       EditorView.editable.of(!props.readonly),
       theme,
+      syntaxHighlighting(highlighting),
       EditorView.updateListener.of((update) => {
         if (update.docChanged && !updatingFromParent) {
           emit('update:modelValue', update.state.doc.toString())

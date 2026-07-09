@@ -26,6 +26,7 @@ export interface StatusResponse {
   subscriptionConfig: string
   logFile: string
   coreVersion: string
+  coreArchitecture: string
   controllerUrl: string
   subscription: SubscriptionState
   routingItems: string[]
