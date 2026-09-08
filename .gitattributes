@@ -1,0 +1,2 @@
+mihomo text eol=lf
+tests/*.py text eol=lf

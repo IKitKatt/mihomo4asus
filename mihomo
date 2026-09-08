@@ -19,6 +19,9 @@ SCRIPT_RAW_URL="${SCRIPT_RAW_URL:-https://raw.githubusercontent.com/$SCRIPT_REPO
 CONFIG_DIR="${CONFIG_DIR:-$MIHOMO_HOME/config}"
 CONFIG_FILE="$CONFIG_DIR/config.yaml"
 SUB_CONFIG_FILE="${SUB_CONFIG_FILE:-$CONFIG_DIR/sub-config.yaml}"
+PROVIDER_CONFIG_FILE="$CONFIG_DIR/provider-config.yaml"
+PROVIDER_TEMPLATE_FILE="$CONFIG_DIR/provider-template.yaml"
+PROVIDER_DIR="$MIHOMO_HOME/providers"
 RUN_DIR="${RUN_DIR:-$MIHOMO_HOME/run}"
 STATE_DIR="${STATE_DIR:-$MIHOMO_HOME/state}"
 LOG_FILE="${LOG_FILE:-$MIHOMO_HOME/mihomo.log}"
@@ -121,16 +124,13 @@ log_size() {
     wc -c < "$LOG_FILE" 2>/dev/null || echo 0
 }
 
-clear_core_log() {
-    rm -f "$LOG_FILE" 2>/dev/null
-}
-
 enforce_log_size() {
     size="$(log_size)"
     case "$size" in
         ''|*[!0-9]*) size=0 ;;
     esac
     if [ "$size" -gt "$LOG_MAX_BYTES" ] 2>/dev/null; then
+        cp "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || return 1
         : > "$LOG_FILE" 2>/dev/null
         printf '%s\n' "mihomo log truncated: ${size} bytes exceeded ${LOG_MAX_BYTES} bytes" | logger -t mihomo
     fi
@@ -200,7 +200,7 @@ migrate_config_extras() {
         [ -e "$config_path" ] || continue
         config_name="${config_path##*/}"
         case "$config_name" in
-            config.yaml|sub-config.yaml) continue ;;
+            config.yaml|sub-config.yaml|provider-config.yaml|provider-template.yaml) continue ;;
         esac
         [ -f "$config_path" ] || continue
         if [ -e "$STATE_DIR/$config_name" ]; then
@@ -212,6 +212,11 @@ migrate_config_extras() {
 }
 
 config_file() {
+    if [ "$(subscription_type)" = "provider" ]; then
+        [ -f "$PROVIDER_CONFIG_FILE" ] || return 1
+        echo "$PROVIDER_CONFIG_FILE"
+        return 0
+    fi
     if [ "$(subscription_type)" = "url" ]; then
         [ -f "$SUB_CONFIG_FILE" ] || return 1
         echo "$SUB_CONFIG_FILE"
@@ -858,37 +863,6 @@ url_host() {
     printf '%s\n' "$host"
 }
 
-url_port() {
-    url="$1"
-    scheme="${url%%://*}"
-    rest="${url#*://}"
-    host_port="${rest%%/*}"
-    port="${host_port##*:}"
-
-    if [ "$port" != "$host_port" ]; then
-        printf '%s\n' "$port"
-        return 0
-    fi
-    case "$scheme" in
-        http) printf '%s\n' "80" ;;
-        *) printf '%s\n' "443" ;;
-    esac
-}
-
-log_subscription_network_info() {
-    url="$1"
-    host="$(url_host "$url")"
-    [ -n "$host" ] || return 0
-
-    log "subscription host: $host"
-    ns_line="$(host_resolved_ips "$host" | awk 'BEGIN { out="" } { out = out ? out "," $1 : $1 } END { print out }')"
-    [ -n "$ns_line" ] && log "subscription host resolved to: $ns_line"
-
-    if command -v ping >/dev/null 2>&1; then
-        ping -c 1 -W 2 "$host" >/dev/null 2>&1 && log "subscription host ping: ok" || log "subscription host ping: failed"
-    fi
-}
-
 subscription_response_valid() {
     file="$1"
     [ -s "$file" ] || return 1
@@ -907,72 +881,6 @@ subscription_response_valid() {
         }
         END { exit found ? 0 : 1 }
     ' "$file"
-}
-
-host_resolved_ips() {
-    host="$1"
-    if command -v nslookup >/dev/null 2>&1; then
-        nslookup "$host" 2>/dev/null
-    elif [ -x /bin/busybox ]; then
-        /bin/busybox nslookup "$host" 2>/dev/null
-    else
-        return 1
-    fi | awk '
-        /^Name:/ { in_answer=1; next }
-        /^Non-authoritative answer:/ { in_answer=1; next }
-        in_answer && /^Address[ 0-9]*:/ {
-            for (i=1; i<=NF; i++) {
-                if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) print $i
-            }
-        }
-        in_answer && /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { print $1 }
-    ' | awk '!seen[$0]++'
-}
-
-get_lan_ips() {
-    if command -v nvram >/dev/null 2>&1; then
-        for key in lan_ipaddr lan1_ipaddr lan2_ipaddr; do
-            value="$(nvram get "$key" 2>/dev/null)"
-            case "$value" in
-                [0-9]*.[0-9]*.[0-9]*.[0-9]*) printf '%s\n' "$value" ;;
-            esac
-        done
-    fi
-    ip addr show "$LAN_IF" 2>/dev/null | awk '
-        /inet / {
-            ip=$2
-            sub(/\/.*/, "", ip)
-            if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) print ip
-        }
-    '
-}
-
-first_lan_ip() {
-    get_lan_ips | awk '
-        /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ {
-            print
-            exit
-        }
-    '
-}
-
-lan_subnet_prefix() {
-    ip="$(first_lan_ip)"
-    [ -n "$ip" ] || return 1
-    printf '%s\n' "$ip" | awk -F. 'NF == 4 { print $1 "." $2 "." $3 }'
-}
-
-subnet_scan_targets() {
-    port="$1"
-    prefix="$(lan_subnet_prefix)"
-    [ -n "$prefix" ] || return 1
-
-    printf '127.0.0.1:%s\n' "$port"
-    i=1
-    while [ "$i" -le 254 ]; do
-        printf '%s.%s:%s\n' "$prefix" "$i" "$port"
-        i=$((i + 1))
-    done
 }
 
 detect_device_model() {
@@ -1103,8 +1011,6 @@ http_get_subscription_to_file() {
     dst="$2"
     err_file="$RUN_DIR/subscription-http.err.$$"
     hdr_file="$RUN_DIR/subscription-http.headers.$$"
-    host="$(url_host "$url")"
-    port="$(url_port "$url")"
     headers="$(subscription_headers)"
     hwid="$(printf '%s\n' "$headers" | sed -n '1p')"
     device_os="$(printf '%s\n' "$headers" | sed -n '2p')"
@@ -1114,7 +1020,6 @@ http_get_subscription_to_file() {
     accept_header="Accept: application/json, text/plain, */*"
 
     rm -f "$dst" "$err_file" "$hdr_file" "$SUBSCRIPTION_PROFILE_INTERVAL_FILE"
-    log_subscription_network_info "$url"
 
     curl_bin="$(find_command_path curl 2>/dev/null)"
     [ -n "$curl_bin" ] || {
@@ -1122,7 +1027,7 @@ http_get_subscription_to_file() {
         return 1
     }
 
-    if "$curl_bin" -4 -fsSL --connect-timeout 10 -m 60 \
+    if "$curl_bin" --noproxy '*' -4 -fsSL --connect-timeout 5 -m 20 --max-redirs 3 \
         -D "$hdr_file" \
         -A "$user_agent" \
         -H "$accept_header" \
@@ -1135,41 +1040,185 @@ http_get_subscription_to_file() {
         rm -f "$err_file" "$hdr_file"
         return 0
     fi
-    log_http_error "curl direct subscription request failed" "$err_file"
+    log "subscription request failed (network, HTTP, TLS or response format)"
     rm -f "$dst" "$err_file" "$hdr_file"
 
-    scan_targets="$(subnet_scan_targets "$port")"
-    if [ -n "$scan_targets" ]; then
-        prefix="$(lan_subnet_prefix)"
-        [ -n "$prefix" ] && log "subscription scan subnet: ${prefix}.0/24 port $port"
-        while read scan_target; do
-            [ -n "$scan_target" ] || continue
-            scan_ip="${scan_target%:*}"
-            scan_port="${scan_target##*:}"
-            if "$curl_bin" -4 -fsSL --connect-timeout 1 -m 8 \
-                -D "$hdr_file" \
-                --connect-to "$host:$port:$scan_ip:$scan_port" \
-                -A "$user_agent" \
-                -H "$accept_header" \
-                -H "x-hwid: $hwid" \
-                -H "x-device-os: $device_os" \
-                -H "x-ver-os: $ver_os" \
-                -H "x-device-model: $device_model" \
-                -o "$dst" "$url" 2>"$err_file" && subscription_response_valid "$dst"; then
-                log "subscription found on local address: $scan_target"
-                capture_subscription_profile_interval "$hdr_file"
-                rm -f "$err_file" "$hdr_file"
-                return 0
-            fi
-            rm -f "$dst" "$err_file" "$hdr_file"
-        done <<EOF
-$scan_targets
-EOF
-    fi
-
-    log "Не удалось получить подписку по адресу: $url"
+    log "Не удалось импортировать подписку. Проверьте адрес и доступность сервера."
     rm -f "$err_file" "$hdr_file"
     return 1
+}
+
+yaml_quote() {
+    # Single-quoted YAML scalar. Preserve URL query characters and apostrophes.
+    printf "'"
+    printf '%s' "$1" | sed "s/'/''/g"
+    printf "'"
+}
+
+confirm_continue_without_import() {
+    printf '\nНе удалось импортировать подписку.\n'
+    printf 'Продолжить без импорта? (Y/N) [N]: '
+    IFS= read -r answer || return 1
+    case "$answer" in
+        Y|y) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+provider_template() {
+    cat <<'YAML'
+# Local router policy. Subscription supplies nodes only.
+mode: rule
+tproxy-port: 7894
+allow-lan: true
+ipv6: false
+find-process-mode: off
+log-level: info
+profile:
+  store-selected: true
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  ipv6: false
+  enhanced-mode: redir-host
+  nameserver:
+    - 1.1.1.1
+    - 8.8.8.8
+proxy-groups:
+  - name: PROXY
+    type: select
+    use:
+      - subscription
+rules:
+  - MATCH,PROXY
+YAML
+}
+
+write_provider_config() {
+    # Called in the import subshell; do not interpolate input into shell code.
+    cat "$1" || return 1
+    printf '\nproxy-providers:\n  subscription:\n    type: http\n    url: '
+    yaml_quote "$2"
+    printf '\n    path: '
+    yaml_quote "$3"
+    printf '\n    interval: %s\n    proxy: DIRECT\n    header:\n' "$(($4 * 3600))"
+    provider_headers="$(subscription_headers)"
+    header_number=1
+    for header_name in x-hwid x-device-os x-ver-os x-device-model User-Agent; do
+        header_value="$(printf '%s\n' "$provider_headers" | sed -n "${header_number}p")"
+        printf '      %s:\n        - ' "$header_name"
+        yaml_quote "$header_value"
+        printf '\n'
+        header_number=$((header_number + 1))
+    done
+    printf "      Accept:\n        - 'application/json, text/plain, */*'\n"
+}
+
+provider_import() {
+    (
+        # Keep old config and settings until both download and validation succeed.
+        umask 077
+        import_url="$1"
+        import_hours="$(printf '%s' "$2" | sed 's/^0*//')"
+        case "$import_url" in
+            http://?*|https://?*) ;;
+            *) print_message ERROR 'Expected an http(s) subscription URL'; exit 1 ;;
+        esac
+        if printf '%s' "$import_url" | LC_ALL=C grep -q '[[:space:][:cntrl:]]'; then
+            print_message ERROR 'URL must not contain whitespace or control characters'
+            exit 1
+        fi
+        case "$import_hours" in ''|*[!0-9]*) exit 1 ;; esac
+        [ "$import_hours" -ge 1 ] && [ "$import_hours" -le 8760 ] || exit 1
+        [ -x "$MIHOMO_BIN" ] || { print_message ERROR 'Install the Mihomo core first'; exit 1; }
+        mkdir -p "$PROVIDER_DIR" "$CONFIG_DIR" "$STATE_DIR" "$RUN_DIR" || exit 1
+        if ! mkdir "$RUN_DIR/provider-import.lock" 2>/dev/null; then
+            print_message ERROR "Another import is active, or a stale lock exists: $RUN_DIR/provider-import.lock"
+            exit 1
+        fi
+        import_work="$(mktemp -d "$RUN_DIR/provider.XXXXXX")" || {
+            rmdir "$RUN_DIR/provider-import.lock"
+            exit 1
+        }
+        import_cache=''
+        trap 'rm -f "$import_work"/*; rmdir "$import_work" "$RUN_DIR/provider-import.lock" 2>/dev/null; [ -z "$import_cache" ] || rm -f "$import_cache"' EXIT
+        trap 'exit 1' HUP INT TERM
+        if [ "${3:-download}" = "rebuild" ]; then
+            [ "$(subscription_type)" = "provider" ] && [ -f "$PROVIDER_TEMPLATE_FILE" ] || {
+                print_message ERROR 'Import a provider before rebuilding its local config'
+                exit 1
+            }
+            # Read only the path line generated by write_provider_config.
+            rebuild_cache="$(sed -n "s/^    path: '\(.*\)'$/\1/p" "$PROVIDER_CONFIG_FILE" | sed "s/''/'/g")"
+            [ -n "$rebuild_cache" ] && [ -s "$rebuild_cache" ] || {
+                print_message ERROR 'Provider cache is missing; use subscription update'
+                exit 1
+            }
+            cp "$rebuild_cache" "$import_work/raw" || exit 1
+        else
+            http_get_subscription_to_file "$import_url" "$import_work/raw" || exit 1
+        fi
+        # Validate the nodes with the core, without importing remote DNS/rules.
+        # The original response itself is kept byte-for-byte in the provider cache.
+        awk '
+            /^proxies:[[:space:]]*/ { inside=1; print; next }
+            inside && /^[^[:space:]#-][^:]*:/ { exit }
+            inside { print }
+        ' "$import_work/raw" > "$import_work/nodes.yaml"
+        grep -q 'name:' "$import_work/nodes.yaml" || {
+            print_message ERROR 'Expected a Mihomo YAML subscription with a non-empty proxies list'
+            exit 1
+        }
+        "$MIHOMO_BIN" -t -d "$MIHOMO_HOME" -f "$import_work/nodes.yaml" > "$import_work/check.log" 2>&1 || {
+            print_message ERROR 'Mihomo rejected the subscription nodes; previous config is unchanged'
+            exit 1
+        }
+        if [ -f "$PROVIDER_TEMPLATE_FILE" ]; then
+            cp "$PROVIDER_TEMPLATE_FILE" "$import_work/template" || exit 1
+        else
+            provider_template > "$import_work/template" || exit 1
+            preserve_operational_config "$CONFIG_FILE" "$import_work/template" || exit 1
+        fi
+        # This template owns policy, while the script owns the one provider block.
+        grep -q '^proxy-providers:' "$import_work/template" && {
+            print_message ERROR 'Remove proxy-providers from provider-template.yaml; it is managed by the script'
+            exit 1
+        }
+        import_cache="$(mktemp "$PROVIDER_DIR/subscription-XXXXXX")" || exit 1
+        cp "$import_work/raw" "$import_cache" || exit 1
+        write_provider_config "$import_work/template" "$import_url" "$import_cache" "$import_hours" > "$import_work/config" || exit 1
+        detect_tproxy_port "$import_work/config" >/dev/null || exit 1
+        "$MIHOMO_BIN" -t -d "$MIHOMO_HOME" -f "$import_work/config" > "$import_work/check.log" 2>&1 || {
+            print_message ERROR 'Mihomo rejected the provider template; previous config is unchanged'
+            exit 1
+        }
+        printf 'TYPE=provider\nURL=%s\nUPDATE_HOURS=%s\n' "$import_url" "$import_hours" > "$import_work/settings" || exit 1
+        [ ! -f "$PROVIDER_CONFIG_FILE" ] || cp "$PROVIDER_CONFIG_FILE" "$import_work/previous" || exit 1
+        [ -f "$PROVIDER_TEMPLATE_FILE" ] || cp "$import_work/template" "$PROVIDER_TEMPLATE_FILE" || exit 1
+        mv "$import_work/config" "$PROVIDER_CONFIG_FILE" || exit 1
+        if ! mv "$import_work/settings" "$SUBSCRIPTION_SETTINGS_FILE"; then
+            if [ -f "$import_work/previous" ]; then
+                mv "$import_work/previous" "$PROVIDER_CONFIG_FILE"
+            else
+                rm -f "$PROVIDER_CONFIG_FILE"
+            fi
+            exit 1
+        fi
+        # Keep prior cache files while an older config can still be running.
+        import_cache=''
+        [ "${3:-download}" = "rebuild" ] || touch_subscription_last
+        log 'Provider config saved; automatic node updates are handled by Mihomo'
+    )
+}
+
+subscription_import_interactive() {
+    printf 'Subscription URL: '
+    IFS= read -r menu_url || return 1
+    if subscription_mihomo set "$menu_url"; then
+        return 0
+    fi
+    # Y keeps the previously selected config, or local mode on a fresh install.
+    confirm_continue_without_import
 }
 
 subscription_setting() {
@@ -1188,6 +1237,7 @@ subscription_type() {
     type="$(subscription_setting type)"
     case "$type" in
         url|remote) printf '%s\n' "url" ;;
+        provider) printf '%s\n' "provider" ;;
         local) printf '%s\n' "local" ;;
         *)
             if [ -n "$(subscription_setting url)" ]; then
@@ -1228,10 +1278,10 @@ save_subscription_settings() {
     hours="$3"
     tmp_settings=""
     case "$type" in
-        local|url) ;;
-        *) die "subscription type must be local or url" ;;
+        local|url|provider) ;;
+        *) die "subscription type must be local, provider or url" ;;
     esac
-    if [ "$type" = "url" ] && [ -z "$url" ]; then
+    if [ "$type" != "local" ] && [ -z "$url" ]; then
         die "subscription URL is required"
     fi
     case "$hours" in
@@ -1445,6 +1495,7 @@ subscription_update_config() {
 }
 
 subscription_update_if_needed() {
+    [ "$(subscription_type)" = "provider" ] && return 0
     [ "$(subscription_type)" = "url" ] || return 0
     [ -n "$(subscription_setting url)" ] || return 0
     [ -f "$SUB_CONFIG_FILE" ] || { subscription_update_config; return 0; }
@@ -1588,28 +1639,65 @@ get_wan_ips() {
     '
 }
 
+get_router_ips() {
+    ip addr show 2>/dev/null | awk '
+        /inet / {
+            ip=$2
+            sub(/\/.*/, "", ip)
+            if (ip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) print ip
+        }
+    ' | awk '!seen[$0]++'
+}
+
+get_local_networks() {
+    ip route show dev "$LAN_IF" 2>/dev/null | awk '
+        $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\/[0-9]+$/ { print $1 }
+    ' | awk '!seen[$0]++'
+}
+
+add_vpn_interface_bypass_rules() {
+    chain="$1"
+    for interface_pattern in tun+ tap+ wg+; do
+        iptables -t mangle -A "$chain" -i "$interface_pattern" -j RETURN || return 1
+    done
+}
+
+add_router_local_bypass_rules() {
+    chain="$1"
+    if iptables -t mangle -A "$chain" -m addrtype --dst-type LOCAL -j RETURN 2>/dev/null; then
+        return 0
+    fi
+
+    for ip in $(get_router_ips); do
+        iptables -t mangle -A "$chain" -d "$ip" -j RETURN || return 1
+    done
+}
+
 add_wan_bypass_rules() {
     chain="$1"
     for ip in $(get_wan_ips); do
         case "$ip" in
             ''|0.0.0.0) continue ;;
         esac
-        iptables -t mangle -A "$chain" -d "$ip" -j RETURN
+        iptables -t mangle -A "$chain" -d "$ip" -j RETURN || return 1
     done
 }
 
 add_bypass_rules() {
     chain="$1"
-    iptables -t mangle -A "$chain" -d 0.0.0.0/8 -j RETURN
-    iptables -t mangle -A "$chain" -d 10.0.0.0/8 -j RETURN
-    iptables -t mangle -A "$chain" -d 100.64.0.0/10 -j RETURN
-    iptables -t mangle -A "$chain" -d 127.0.0.0/8 -j RETURN
-    iptables -t mangle -A "$chain" -d 169.254.0.0/16 -j RETURN
-    iptables -t mangle -A "$chain" -d 172.16.0.0/12 -j RETURN
-    iptables -t mangle -A "$chain" -d 192.168.0.0/16 -j RETURN
-    iptables -t mangle -A "$chain" -d 224.0.0.0/4 -j RETURN
-    iptables -t mangle -A "$chain" -d 240.0.0.0/4 -j RETURN
-    iptables -t mangle -A "$chain" -d 255.255.255.255/32 -j RETURN
+    add_vpn_interface_bypass_rules "$chain" || return 1
+    add_router_local_bypass_rules "$chain" || return 1
+
+    for network in $(get_local_networks); do
+        iptables -t mangle -A "$chain" -d "$network" -j RETURN || return 1
+    done
+
+    iptables -t mangle -A "$chain" -d 0.0.0.0/8 -j RETURN || return 1
+    iptables -t mangle -A "$chain" -d 127.0.0.0/8 -j RETURN || return 1
+    iptables -t mangle -A "$chain" -d 169.254.0.0/16 -j RETURN || return 1
+    iptables -t mangle -A "$chain" -d 224.0.0.0/4 -j RETURN || return 1
+    iptables -t mangle -A "$chain" -d 240.0.0.0/4 -j RETURN || return 1
+    iptables -t mangle -A "$chain" -d 255.255.255.255/32 -j RETURN || return 1
     add_wan_bypass_rules "$chain"
 }
 
@@ -1650,7 +1738,7 @@ add_exclude_rules() {
     chain="$1"
     [ "$(routing_mode)" = "exclude" ] || return 0
     list_items "$ROUTING_FILE" | while IFS= read -r item || [ -n "$item" ]; do
-        iptables -t mangle -A "$chain" -s "$item" -j RETURN
+        iptables -t mangle -A "$chain" -s "$item" -j RETURN || return 1
     done
 }
 
@@ -1708,7 +1796,7 @@ delete_list_items() {
 }
 
 has_include_rules() {
-    [ "$(routing_mode)" = "include" ] && [ -n "$(list_items "$ROUTING_FILE")" ]
+    [ "$(routing_mode)" = "include" ]
 }
 
 apply_mihomo_target() {
@@ -1719,8 +1807,8 @@ apply_mihomo_target() {
     src_arg=""
     [ -n "$src" ] && src_arg="-s $src"
 
-    iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -p tcp -j TPROXY --on-port "$tproxy_port" --tproxy-mark "$FW_MARK"
-    iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -p udp -j TPROXY --on-port "$tproxy_port" --tproxy-mark "$FW_MARK"
+    iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -p tcp -j TPROXY --on-port "$tproxy_port" --tproxy-mark "$FW_MARK" || return 1
+    iptables -t mangle -A "$chain" -i "$LAN_IF" $src_arg -p udp -j TPROXY --on-port "$tproxy_port" --tproxy-mark "$FW_MARK" || return 1
 }
 
 add_mihomo_route_rules() {
@@ -1729,65 +1817,86 @@ add_mihomo_route_rules() {
 
     if has_include_rules; then
         list_items "$ROUTING_FILE" | while read item; do
-            apply_mihomo_target "$chain" "$item" "$tproxy_port"
+            apply_mihomo_target "$chain" "$item" "$tproxy_port" || return 1
         done
     else
-        apply_mihomo_target "$chain" "" "$tproxy_port"
+        apply_mihomo_target "$chain" "" "$tproxy_port" || return 1
     fi
 }
 
 apply_dns_redirect() {
     dns_port="$1"
-    iptables -t nat -N "$NAT_CHAIN" 2>/dev/null
-    iptables -t nat -F "$NAT_CHAIN"
+    iptables -t nat -N "$NAT_CHAIN" 2>/dev/null || return 1
+    iptables -t nat -F "$NAT_CHAIN" || return 1
     iptables -t nat -C PREROUTING -j "$NAT_CHAIN" 2>/dev/null || \
-        iptables -t nat -I PREROUTING -j "$NAT_CHAIN"
+        iptables -t nat -I PREROUTING -j "$NAT_CHAIN" || return 1
 
     if [ "$(routing_mode)" = "exclude" ]; then
         list_items "$ROUTING_FILE" | while read item; do
-            iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p tcp --dport 53 -j RETURN
-            iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p udp --dport 53 -j RETURN
-        done
+            iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p tcp --dport 53 -j RETURN || return 1
+            iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p udp --dport 53 -j RETURN || return 1
+        done || return 1
     fi
 
     if has_include_rules; then
         list_items "$ROUTING_FILE" | while read item; do
-            iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p tcp --dport 53 -j REDIRECT --to-ports "$dns_port"
-            iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p udp --dport 53 -j REDIRECT --to-ports "$dns_port"
-        done
+            iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p tcp --dport 53 -j REDIRECT --to-ports "$dns_port" || return 1
+            iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -s "$item" -p udp --dport 53 -j REDIRECT --to-ports "$dns_port" || return 1
+        done || return 1
     else
-        iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -p tcp --dport 53 -j REDIRECT --to-ports "$dns_port"
-        iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -p udp --dport 53 -j REDIRECT --to-ports "$dns_port"
+        iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -p tcp --dport 53 -j REDIRECT --to-ports "$dns_port" || return 1
+        iptables -t nat -A "$NAT_CHAIN" -i "$LAN_IF" -p udp --dport 53 -j REDIRECT --to-ports "$dns_port" || return 1
     fi
 }
 
 apply_rules() {
-    cfg="$(config_file)" || die "missing active config"
-    tproxy_port="$(detect_tproxy_port "$cfg")" || die "config $cfg must contain numeric tproxy-port, for example: tproxy-port: 7894"
+    (
+        mkdir -p "$RUN_DIR" || exit 1
+        mkdir "$RUN_DIR/firewall.lock" 2>/dev/null || {
+            print_message ERROR 'Firewall operation already active (or stale firewall.lock)'
+            exit 1
+        }
+        trap 'rmdir "$RUN_DIR/firewall.lock" 2>/dev/null' EXIT
+        trap 'flush_rules; rm -f "$MODE_FILE"; exit 1' HUP INT TERM
+        if apply_rules_checked; then
+            exit 0
+        fi
+        flush_rules
+        rm -f "$MODE_FILE"
+        print_message ERROR 'Firewall setup failed; cleanup attempted, check iptables and routing state'
+        exit 1
+    )
+}
+
+apply_rules_checked() {
+    is_running || { print_message ERROR 'Mihomo is stopped; refusing traffic interception'; return 1; }
+    cfg="$(config_file)" || { print_message ERROR "missing active config"; return 1; }
+    tproxy_port="$(detect_tproxy_port "$cfg")" || { print_message ERROR "invalid tproxy-port"; return 1; }
     dns_port="$(detect_dns_port "$cfg")"
     migrate_routing_list
     route_mode="$(routing_mode)"
     route_items="$(list_items "$ROUTING_FILE")"
 
     flush_rules
-    load_kernel_modules
+    # TPROXY may be built into the kernel; rule insertion is the capability check.
+    load_kernel_modules || true
 
-    iptables -t mangle -N "$MANGLE_CHAIN" 2>/dev/null
-    iptables -t mangle -F "$MANGLE_CHAIN"
+    iptables -t mangle -N "$MANGLE_CHAIN" 2>/dev/null || return 1
+    iptables -t mangle -F "$MANGLE_CHAIN" || return 1
     iptables -t mangle -C PREROUTING -j "$MANGLE_CHAIN" 2>/dev/null || \
-        iptables -t mangle -I PREROUTING -j "$MANGLE_CHAIN"
+        iptables -t mangle -I PREROUTING -j "$MANGLE_CHAIN" || return 1
 
-    add_bypass_rules "$MANGLE_CHAIN"
-    add_exclude_rules "$MANGLE_CHAIN"
-    iptables -t mangle -A "$MANGLE_CHAIN" -i "$LAN_IF" -p tcp --dport 53 -j RETURN
-    iptables -t mangle -A "$MANGLE_CHAIN" -i "$LAN_IF" -p udp --dport 53 -j RETURN
+    add_bypass_rules "$MANGLE_CHAIN" || return 1
+    add_exclude_rules "$MANGLE_CHAIN" || return 1
+    iptables -t mangle -A "$MANGLE_CHAIN" -i "$LAN_IF" -p tcp --dport 53 -j RETURN || return 1
+    iptables -t mangle -A "$MANGLE_CHAIN" -i "$LAN_IF" -p udp --dport 53 -j RETURN || return 1
 
-    add_mihomo_route_rules "$MANGLE_CHAIN" "$tproxy_port"
-    ip route add local 0.0.0.0/0 dev lo table "$ROUTE_TABLE" 2>/dev/null
+    add_mihomo_route_rules "$MANGLE_CHAIN" "$tproxy_port" || return 1
+    ip route add local 0.0.0.0/0 dev lo table "$ROUTE_TABLE" 2>/dev/null || return 1
 
-    ip rule add fwmark "$FW_MARK" lookup "$ROUTE_TABLE" priority "$RULE_PRIORITY" 2>/dev/null
-    apply_dns_redirect "$dns_port"
-    echo "tproxy" > "$MODE_FILE"
+    ip rule add fwmark "$FW_MARK" lookup "$ROUTE_TABLE" priority "$RULE_PRIORITY" 2>/dev/null || return 1
+    apply_dns_redirect "$dns_port" || return 1
+    echo "tproxy" > "$MODE_FILE" || return 1
     log "rules applied: mode=tproxy tproxy_port=$tproxy_port dns_port=$dns_port table=$ROUTE_TABLE mark=$FW_MARK"
     case "$route_mode" in
         include)
@@ -1807,8 +1916,8 @@ start_mihomo() {
     ensure_alias
     is_running && die "mihomo is already running"
     rm -f "$MIHOMO_HOME/mihomo-debug.log" "$RUN_DIR/mihomo-supervisor.pid" "$RUN_DIR/stop.flag" 2>/dev/null
-    clear_core_log
-    : > "$LOG_FILE" 2>/dev/null || die "cannot create $LOG_FILE"
+
+    touch "$LOG_FILE" 2>/dev/null || die "cannot create $LOG_FILE"
     subscription_update_if_needed
     cfg="$(config_file)" || die "missing active config"
     [ -x "$MIHOMO_BIN" ] || die "missing executable $MIHOMO_BIN"
@@ -1826,7 +1935,10 @@ start_mihomo() {
         die "mihomo failed to start; check $LOG_FILE"
     fi
 
-    apply_rules
+    if ! apply_rules; then
+        stop_mihomo
+        die "mihomo stopped after firewall setup failure; see $LOG_FILE"
+    fi
     install_hooks
     start_subscription_updater
     log "mihomo started in tproxy mode"
@@ -1840,7 +1952,7 @@ stop_mihomo() {
 
     if ! is_running; then
         rm -f "$PID_FILE" "$MODE_FILE"
-        clear_core_log
+
         log "mihomo stopped"
         return 0
     fi
@@ -1856,7 +1968,7 @@ stop_mihomo() {
     fi
 
     rm -f "$PID_FILE" "$MODE_FILE"
-    clear_core_log
+
     log "mihomo stopped"
 }
 
@@ -1871,37 +1983,18 @@ install_mihomo() {
 
 install_config_setup() {
     while :; do
-        printf '\n%s%s%s\n' "$BOLD" "Mihomo config setup" "$RESET"
-        printf '  1) Local config\n'
-        printf '  2) Subscription URL\n'
-        printf '\nSelect config method [1]: '
-        read choice
-        [ -n "$choice" ] || choice=1
-        case "$choice" in
+        ui_section 'CONFIG SETUP'
+        printf '  1) Local config\n  2) Proxy-provider (recommended)\n  0) Back\n\nSelect [1]: '
+        IFS= read -r choice || return 1
+        case "${choice:-1}" in
             1)
                 save_subscription_settings local "" "$(subscription_update_hours)"
-                stop_subscription_updater
                 log "put local config to $CONFIG_FILE before start"
                 return 0
                 ;;
-            2)
-                printf 'Enter subscription URL: '
-                read url
-                [ -n "$url" ] || {
-                    print_message "WARN" "subscription URL is required"
-                    continue
-                }
-                save_subscription_settings url "$url" "$(subscription_update_hours)"
-                if subscription_update_config; then
-                    log "subscription config saved to $SUB_CONFIG_FILE"
-                    log "config is ready; run: mihomo start"
-                    return 0
-                fi
-                die "subscription config import failed"
-                ;;
-            *)
-                print_message "WARN" "unknown option"
-                ;;
+            2) subscription_import_interactive; return $? ;;
+            0) return 0 ;;
+            *) print_message WARN 'Unknown option' ;;
         esac
     done
 }
@@ -1959,7 +2052,7 @@ include_mihomo() {
     migrate_routing_list
     case "$1" in
         show|"")
-            show_list "Included IP/CIDR list. If not empty, only these clients use Mihomo." "$ROUTING_FILE"
+            show_list "Included IP/CIDR list. Only listed clients use Mihomo; empty means nobody." "$ROUTING_FILE"
             ;;
         clear)
             set_routing_mode include
@@ -2011,9 +2104,9 @@ subscription_mihomo() {
             hours="$(subscription_update_hours)"
             sub_type="$(subscription_type)"
             print_message "INFO" "config type: $sub_type"
-            if [ "$sub_type" = "url" ] && [ -n "$url" ]; then
-                print_message "INFO" "subscription URL: $url"
-                print_message "INFO" "subscription config: $SUB_CONFIG_FILE"
+            if [ "$sub_type" != "local" ] && [ -n "$url" ]; then
+                print_message "INFO" "subscription host: $(url_host "$url")"
+                print_message "INFO" "selected config: $(config_file)"
                 print_message "INFO" "update interval: ${hours}h"
                 last="$(cat "$SUBSCRIPTION_LAST_FILE" 2>/dev/null)"
                 case "$last" in
@@ -2031,7 +2124,13 @@ subscription_mihomo() {
             stop_subscription_updater
             print_message "SUCCESS" "config type set to local"
             ;;
-        set|url)
+        set|provider)
+            shift
+            provider_import "$1" "${2:-$(subscription_update_hours)}" || return 1
+            stop_subscription_updater
+            print_message SUCCESS 'Provider config saved. Run mihomo restart (or start) to apply it.'
+            ;;
+        full|url)
             shift
             url="$1"
             hours="${2:-$(subscription_update_hours)}"
@@ -2046,11 +2145,29 @@ subscription_mihomo() {
             url="$(subscription_setting url)"
             hours="$1"
             [ -n "$hours" ] || die "usage: mihomo subscription hours <hours>"
+            if [ "$(subscription_type)" = "provider" ]; then
+                provider_import "$url" "$hours" rebuild || return 1
+                print_message SUCCESS 'Provider interval saved. Restart Mihomo to apply it.'
+                return 0
+            fi
             save_subscription_settings "$(subscription_type)" "$url" "$hours"
             print_message "SUCCESS" "subscription interval updated"
             is_running && start_subscription_updater
             ;;
+        rebuild)
+            [ "$(subscription_type)" = "provider" ] || { print_message ERROR 'Select a provider first'; return 1; }
+            provider_import "$(subscription_setting url)" "$(subscription_update_hours)" rebuild || return 1
+            print_message SUCCESS 'Config rebuilt from cache. Restart Mihomo to apply it.'
+            ;;
         update)
+            if [ "$(subscription_type)" = "provider" ]; then
+                provider_import "$(subscription_setting url)" "$(subscription_update_hours)" || return 1
+                if is_running; then
+                    stop_mihomo
+                    start_mihomo
+                fi
+                return 0
+            fi
             subscription_update_and_reload manual
             print_message "SUCCESS" "subscription update completed"
             ;;
@@ -2063,7 +2180,7 @@ subscription_mihomo() {
             print_message "SUCCESS" "subscription disabled; local config will be used"
             ;;
         *)
-            print_message "INFO" "Usage: mihomo subscription {show|local|set|hours|update|clear}"
+            print_message "INFO" "Usage: mihomo subscription {show|local|set|full|hours|rebuild|update|clear}"
             exit 1
             ;;
     esac
@@ -2127,42 +2244,11 @@ update_script() {
 }
 
 status_mihomo() {
-    ensure_alias
-    arch="$(get_uname -m)"
-    if is_running; then
-        state="running"
-    else
-        state="not running"
-    fi
-
-    if [ "$state" = "running" ]; then
-        print_message "SUCCESS" "mihomo: running"
-    else
-        print_message "WARN" "mihomo: not running"
-    fi
-    print_message "INFO" "architecture: $arch"
-    [ -x "$MIHOMO_BIN" ] && print_message "INFO" "core: $MIHOMO_BIN"
-    version="$(current_version)"
-    [ -n "$version" ] && print_message "INFO" "version: $version"
-    cfg="$(config_file 2>/dev/null)"
-    [ -n "$cfg" ] && print_message "INFO" "active config: $cfg"
-    print_message "INFO" "local config: $CONFIG_FILE"
-    print_message "INFO" "subscription config: $SUB_CONFIG_FILE"
-    subscription_url="$(subscription_setting url)"
-    if [ "$(subscription_type)" = "url" ] && [ -n "$subscription_url" ]; then
-        print_message "INFO" "subscription: enabled, every $(subscription_update_hours)h"
-    else
-        print_message "INFO" "subscription: local config"
-    fi
-    migrate_routing_list
-    print_message "INFO" "routing: $(routing_mode), list $ROUTING_FILE"
-    if [ -f "$SS_SCRIPT" ] && grep -qF "$SCRIPT_PATH start" "$SS_SCRIPT" 2>/dev/null; then
-        print_message "INFO" "autostart: enabled"
-    else
-        print_message "WARN" "autostart: hook is missing; run mihomo install"
-    fi
-    print_message "INFO" "core log: $LOG_FILE"
-    print_message "INFO" "core log limit: $LOG_MAX_BYTES bytes"
+    console_dashboard
+    ui_section 'DETAILS'
+    ui_row 'Core version' "$(current_version 2>/dev/null || printf 'Not installed')"
+    ui_row 'Log' "$LOG_FILE"
+    ui_row 'Provider policy' "$PROVIDER_TEMPLATE_FILE"
 }
 
 log_mihomo() {
@@ -2178,7 +2264,7 @@ log_mihomo() {
 
 pause_enter() {
     printf '\nPress Enter to continue... '
-    read dummy
+    IFS= read -r dummy || return 0
 }
 
 setup_list_menu() {
@@ -2194,25 +2280,25 @@ setup_list_menu() {
         printf '  4) Clear list\n'
         printf '  0) Back\n'
         printf '\nSelect option: '
-        read choice
+        IFS= read -r choice || return 0
         case "$choice" in
             1)
                 printf 'Enter IP/CIDR separated by spaces: '
-                read items
+                IFS= read -r items || return 0
                 [ -n "$items" ] && append_list_items "$file" $items
                 print_message "SUCCESS" "$list_name list updated"
                 is_running && apply_rules
                 ;;
             2)
                 printf 'Enter IP/CIDR to delete, separated by spaces: '
-                read items
+                IFS= read -r items || return 0
                 [ -n "$items" ] && delete_list_items "$file" $items
                 print_message "SUCCESS" "$list_name list updated"
                 is_running && apply_rules
                 ;;
             3)
                 printf 'Enter new IP/CIDR list, separated by spaces: '
-                read items
+                IFS= read -r items || return 0
                 : > "$file"
                 [ -n "$items" ] && append_list_items "$file" $items
                 print_message "SUCCESS" "$list_name list replaced"
@@ -2244,7 +2330,7 @@ setup_mihomo() {
         printf '  4) Restart routing rules\n'
         printf '  0) Back\n'
         printf '\nSelect option: '
-        read choice
+        IFS= read -r choice || return 0
         case "$choice" in
             1) routing_method_menu ;;
             2) set_routing_mode off; print_message "SUCCESS" "selective routing disabled"; is_running && apply_rules; pause_enter ;;
@@ -2264,7 +2350,7 @@ routing_method_menu() {
         printf '  2) Exclude\n'
         printf '  0) Back\n'
         printf '\nSelect option: '
-        read choice
+        IFS= read -r choice || return 0
         case "$choice" in
             1) set_routing_mode include; print_message "SUCCESS" "routing mode set to include"; is_running && apply_rules; pause_enter; return 0 ;;
             2) set_routing_mode exclude; print_message "SUCCESS" "routing mode set to exclude"; is_running && apply_rules; pause_enter; return 0 ;;
@@ -2369,8 +2455,10 @@ usage_mihomo() {
     print_message "ACTION" "Subscription config"
     printf '  mihomo subscription show\n'
     printf '  mihomo subscription local\n'
-    printf '  mihomo subscription set <url>\n'
+    printf '  mihomo subscription set <url>       import proxy-provider (recommended)\n'
+    printf '  mihomo subscription full <url>      legacy full-config method\n'
     printf '  mihomo subscription hours <hours>\n'
+    printf '  mihomo subscription rebuild         rebuild policy from cache (offline)\n'
     printf '  mihomo subscription update\n'
     printf '  mihomo subscription clear\n'
     printf '\n'
@@ -2386,7 +2474,7 @@ update_menu() {
         printf '  2) Update script\n'
         printf '  0) Back\n'
         printf '\nSelect option: '
-        read choice
+        IFS= read -r choice || return 0
         case "$choice" in
             1) update_mihomo; pause_enter ;;
             2) update_script; pause_enter ;;
@@ -2399,66 +2487,89 @@ update_menu() {
 subscription_setup_menu() {
     ensure_dirs
     while :; do
-        printf '\n%s%s%s\n' "$BOLD" "Mihomo subscription setup" "$RESET"
+        ui_section 'SUBSCRIPTION'
         subscription_mihomo show
-        printf '\n'
-        printf '  1) Switch subscription method\n'
-        printf '  2) Set subscription URL\n'
-        printf '  3) Change update interval\n'
-        printf '  4) Update now\n'
-        printf '  5) Disable subscription URL\n'
-        printf '  0) Back\n'
-        printf '\nSelect option: '
-        read choice
+        printf '\n  1) Import proxy-provider\n  2) Use local config\n'
+        printf '  3) Change update interval\n  4) Update now\n  5) Rebuild from cache (offline)\n  0) Back\n\nSelect: '
+        IFS= read -r choice || return 0
         case "$choice" in
-            1) subscription_method_menu ;;
-            2)
-                printf 'Enter subscription URL: '
-                read url
-                subscription_mihomo set "$url"
-                pause_enter
-                ;;
+            1) subscription_import_interactive || return 1; pause_enter ;;
+            2) subscription_mihomo local; pause_enter ;;
             3)
-                printf 'Update interval in hours: '
-                read hours
+                printf 'Update interval (hours): '
+                IFS= read -r hours || return 0
                 subscription_mihomo hours "$hours"
                 pause_enter
                 ;;
             4) subscription_mihomo update; pause_enter ;;
-            5) subscription_mihomo clear; pause_enter ;;
+            5) subscription_mihomo rebuild; pause_enter ;;
             0) return 0 ;;
-            *) print_message "WARN" "unknown option" ;;
+            *) print_message WARN 'Unknown option' ;;
         esac
     done
 }
 
 subscription_method_menu() {
-    while :; do
-        printf '\n%s%s%s\n' "$BOLD" "Switch sub method" "$RESET"
-        print_message "INFO" "current method: $(subscription_type)"
-        printf '  1) Local\n'
-        printf '  2) Subscription URL\n'
-        printf '  0) Back\n'
-        printf '\nSelect option: '
-        read choice
-        case "$choice" in
-            1) subscription_mihomo local; pause_enter; return 0 ;;
-            2)
-                printf 'Enter subscription URL: '
-                read url
-                subscription_mihomo set "$url"
-                pause_enter
-                return 0
-                ;;
-            0) return 0 ;;
-            *) print_message "WARN" "unknown option" ;;
-        esac
-    done
+    subscription_setup_menu
+}
+
+ui_section() {
+    printf '\n%s%s%s\n' "$CYAN$BOLD" "$1" "$RESET"
+    printf '%s\n' '------------------------------------------------------------'
+}
+
+ui_row() {
+    printf '  %-15s %s\n' "$1" "$2"
+}
+
+console_dashboard() {
+    # Read-only snapshot: never install hooks, migrate files, or query remote URLs.
+    printf '\n%s%s%s  %s\n' "$BOLD" 'mihomo4asus' "$RESET" "$SCRIPT_VERSION"
+    ui_section 'SERVICE'
+    if is_running; then
+        ui_row 'Core' "${GREEN}Running${RESET}"
+    else
+        ui_row 'Core' "${YELLOW}Stopped${RESET}"
+    fi
+    if command -v iptables >/dev/null 2>&1 &&
+        iptables -t mangle -C PREROUTING -j "$MANGLE_CHAIN" 2>/dev/null &&
+        iptables -t nat -C PREROUTING -j "$NAT_CHAIN" 2>/dev/null; then
+        ui_row 'Firewall hooks' "${GREEN}Present${RESET}"
+    else
+        ui_row 'Firewall hooks' 'Absent / incomplete'
+    fi
+    if [ -f "$SS_SCRIPT" ] && grep -qF "$SCRIPT_PATH start" "$SS_SCRIPT"; then
+        ui_row 'Autostart' 'Enabled'
+    else
+        ui_row 'Autostart' 'Disabled'
+    fi
+    ui_section 'ROUTING'
+    case "$(routing_mode)" in
+        include) ui_row 'Clients' 'Listed clients only (empty = nobody)' ;;
+        exclude) ui_row 'Clients' 'All except listed' ;;
+        *) ui_row 'Clients' 'All LAN clients' ;;
+    esac
+    ui_row 'Interface' "$LAN_IF"
+    ui_row 'List entries' "$(list_items "$ROUTING_FILE" | awk 'END { print NR+0 }')"
+    ui_section 'SUBSCRIPTION'
+    case "$(subscription_type)" in
+        provider)
+            ui_row 'Method' 'proxy-providers'
+            ui_row 'Node updates' "Mihomo / every $(subscription_update_hours)h"
+            ;;
+        url) ui_row 'Method' 'Full config (legacy)' ;;
+        *) ui_row 'Method' 'Local config' ;;
+    esac
+    dashboard_url="$(subscription_setting url)"
+    [ -z "$dashboard_url" ] || ui_row 'Server' "$(url_host "$dashboard_url")"
+    ui_row 'Selected config' "$(config_file 2>/dev/null || printf 'Not configured')"
+    printf '  Changes to the selected config require start/restart.\n'
 }
 
 main_menu() {
     while :; do
-        printf '\n%s%s%s\n' "$BOLD" "mihomo4asus" "$RESET"
+        console_dashboard
+        ui_section 'ACTIONS'
         printf '  1) Status\n'
         printf '  2) Start\n'
         printf '  3) Restart\n'
@@ -2470,7 +2581,7 @@ main_menu() {
         printf '  9) Commands\n'
         printf '  0) Exit\n'
         printf '\nSelect option: '
-        read choice
+        IFS= read -r choice || return 0
         case "$choice" in
             1) status_mihomo; pause_enter ;;
             2) start_mihomo; pause_enter ;;

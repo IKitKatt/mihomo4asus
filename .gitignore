@@ -41,3 +41,5 @@ include.list
 
 # Old folder
 old/
+./tests
+tests/

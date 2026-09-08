@@ -6,7 +6,8 @@ Minimal **Mihomo** TProxy runner for **ASUSWRT-Merlin** routers with **Entware**
 
 - Router-level Mihomo TProxy routing with DNS redirection for LAN clients.
 - HWID subscription headers.
-- Remote subscription URL import with automatic refresh.
+- HTTP proxy-provider import with automatic node refresh by the core.
+- Read-only SSH dashboard with service, routing and subscription sections.
 - Separate local and subscription configs.
 - Local IP routing control.
 
@@ -30,7 +31,7 @@ The installer creates the required folders, installs the script to `/jffs/addons
 During first install, choose the config method:
 
 - `Local config`: put your Mihomo YAML into `/opt/root/mihomo/config/config.yaml`.
-- `Subscription URL`: paste the URL during install; the script downloads and prepares `/opt/root/mihomo/config/sub-config.yaml`.
+- `Proxy-provider` (recommended): paste a Mihomo YAML subscription URL. The script checks it and prepares `/opt/root/mihomo/config/provider-config.yaml`.
 
 After a successful subscription import, run:
 
@@ -46,11 +47,7 @@ For local mode, create or edit:
 nano /opt/root/mihomo/config/config.yaml
 ```
 
-For subscription mode, the script writes:
-
-```sh
-/opt/root/mihomo/config/sub-config.yaml
-```
+For proxy-provider mode, the script writes `/opt/root/mihomo/config/provider-config.yaml`. Edit the local policy in `/opt/root/mihomo/config/provider-template.yaml`, then run `mihomo subscription rebuild` to validate and regenerate it from cache, followed by `mihomo restart` to apply it. The template must not contain a `proxy-providers` block; the script supplies that block. Existing full-config subscriptions continue to use `sub-config.yaml`.
 
 Minimal local config example:
 
@@ -103,49 +100,74 @@ mihomo restart
 
 ## Subscription Config
 
-`mihomo4asus` can download a user Mihomo config from a subscription URL, send Remnawave HWID headers, and refresh it every N hours while Mihomo is running. The default update interval is 1 hour. If the server returns `profile-update-interval`, that value is saved as the subscription update interval.
-
-Use a subscription URL:
+### Proxy-provider (recommended)
 
 ```sh
 mihomo subscription set "https://example.com/subscription.yaml"
-mihomo subscription update
+mihomo start                 # or restart if already running
 ```
 
-Use the local router config instead:
+The initial import requires a Mihomo YAML document with a non-empty top-level `proxies` list. The script downloads it directly with curl, validates the extracted node definitions and the generated config using `mihomo -t`, and stores the original response unchanged in `providers/`. It does not import the remote DNS settings, rules, groups or listeners. URI/base64-only subscription responses are not accepted by the initial importer.
 
-```sh
-mihomo subscription local
-```
-
-Show or disable subscription settings:
-
-```sh
-mihomo subscription show
-mihomo subscription clear
-```
-
-If the subscription domain points to the same public IP as the router, router-originated requests can fail because ASUSWRT NAT loopback usually does not apply to the router itself. `mihomo4asus` first tries the URL directly, then scans the router LAN `/24` subnet and retries the same URL with `curl --connect-to` for each local IP while keeping the original URL host for Host/SNI. The first response that looks like a Mihomo YAML config is used.
-
-The downloader sends:
+The generated HTTP `proxy-providers.subscription` uses `proxy: DIRECT`, a local cache and the following headers (the same values are used for the initial request):
 
 - `x-hwid`
 - `x-device-os`
 - `x-ver-os`
 - `x-device-model`
-- `user-agent: mihomo4asus/1.0.0`
+- `User-Agent: mihomo4asus/1.0.0`
+- `Accept: application/json, text/plain, */*`
 
-The HWID is a SHA-256 hash from firmware version, router model, and a stable first-use date.
+Mihomo owns periodic node updates. There is no shell subscription timer or scheduled service restart in this mode. The default interval is one hour; `profile-update-interval` does not override the chosen interval in provider mode.
 
-When a downloaded config is applied, the script preserves local operational settings required for `mihomo4asus`: `tproxy-port`, UI/controller keys, `dns.listen`, and the full `sniffer` section. During subscription import only, `tun`, `mixed-port`, LAN bind allow-list keys, DNS proxy outbounds, DNS rules, and unsupported fake-ip DNS options are removed from the downloaded config; `find-process-mode` is forced to `off`.
+The first import creates `config/provider-template.yaml` with TProxy on 7894, DNS on 1053 (redir-host, resolvers 1.1.1.1 and 8.8.8.8), and a `PROXY` select group using the provider. `MATCH,PROXY` sends intercepted traffic through that group. Existing local operational settings are copied using the existing preservation helper. Remote routing policy is not copied. Later imports preserve the template. For custom rules, edit the template; for a fully self-managed config, use local mode.
+
+```sh
+mihomo subscription hours 6  # change interval using the existing cache (offline)
+mihomo subscription rebuild  # regenerate policy from the local template and cache
+mihomo restart              # apply the new provider settings
+mihomo subscription update  # validate/reimport now; restart if running
+mihomo subscription show
+mihomo subscription local
+```
+
+`set`, `hours` and `rebuild` prepare a config without stopping a running core. Start/restart applies it. The SSH dashboard labels it as the **selected** config, because the running process may still use the previous selection. Manual `update` checks the subscription before restarting. `rebuild` and provider-mode `hours` do not download the subscription or advance the last-import timestamp. A missing cache requires `subscription update`. Previous provider cache files are retained so a running older config keeps a valid cache path.
+
+### Failed imports
+
+No subnet scanning, localhost probing or `--connect-to` fallback is performed, including when the subscription domain points to the router's own external IP. A direct request has a five-second connection limit and a twenty-second total limit, with at most three HTTP redirects. On failure, interactive installation/import displays:
+
+```text
+?? ??????? ????????????? ????????.
+?????????? ??? ???????? (Y/N) [N]:
+```
+
+`Y` continues with the previous configuration (local mode on a fresh installation); it does not enable the failed subscription or fabricate a working config. `N`, empty input and EOF cancel the operation. A command-line `subscription set` failure returns nonzero without prompting, so automated calls cannot block on input. The existing config and subscription settings are retained on failed downloads or validation.
+
+### Existing full-config subscriptions
+
+Existing `TYPE=url` settings remain supported and are not silently converted to providers. The legacy method can also be selected explicitly:
+
+```sh
+mihomo subscription full "https://example.com/full-config.yaml"
+mihomo subscription update
+```
+
+That method retains the previous YAML sanitization, local operational-key preservation and shell refresh timer. Prefer `subscription set` for new subscriptions. `mihomo subscription clear` selects local mode again.
+
+### SSH console
+
+Run `mihomo` for the sectioned dashboard and numeric menu. `mihomo status` prints the same read-only snapshot plus details. Rendering does not install hooks, migrate files or make remote requests. Firewall status reports chain hooks, not an end-to-end connectivity test. Colors are enabled only on a terminal; ASCII separators also work without Unicode support. EOF exits menus. No ASUS web interface files are changed.
 
 ## Routing
 
 `routing.list` stores client IP/CIDR values. `routing.mode` controls how the list is interpreted:
 
-- `include`: only listed clients are routed through Mihomo.
+- `include`: only listed clients are routed through Mihomo. An empty list intercepts nobody, including DNS.
 - `exclude`: all LAN clients are routed through Mihomo except listed clients.
 - `off`: selective routing is disabled and all LAN clients are routed through Mihomo.
+
+The `include`/`exclude` decision is applied only to traffic entering from the LAN interface. Before TProxy, the firewall protects the router's actual local addresses (using the kernel `addrtype LOCAL` match when available, with an explicit-address fallback), the directly connected LAN networks, and traffic entering through ASUS firmware VPN interfaces (`tun+`, `tap+`, and `wg+`). RFC1918 supernets are not bypassed globally, so private corporate networks can still reach Mihomo rules when they are selected by the client policy. If a LAN client is simultaneously covered by a firmware full-tunnel VPN and by Mihomo, select one owner for that client in the routing policy to avoid competing paths.
 
 Show routing state:
 
@@ -191,3 +213,13 @@ This stops Mihomo, removes routing rules, removes boot hook lines, deletes `/opt
 - [MetaCubeX/mihomo](https://github.com/MetaCubeX/mihomo) for the Mihomo core.
 - [Dr4tez/sing-box4asus](https://github.com/Dr4tez/sing-box4asus) for the original ASUSWRT-Merlin script approach.
 - [Zephyruso/zashboard](https://github.com/Zephyruso/zashboard) for the dashboard.
+
+## Service and firewall behavior
+
+`start` and `stop` preserve the core log. When the size guard reaches its threshold, it copies the current log to `mihomo.log.1` before truncating the active file, retaining one previous snapshot.
+
+Firewall application requires a running core and checks rule/route creation results. Concurrent `apply-rules` calls are rejected using `run/firewall.lock`. On failure the script attempts to remove partial rules, clears its applied-state marker, and returns an error. If application fails during `start`, the newly started service is stopped. Cleanup errors can still require inspection of the router's actual firewall; a successful process check alone does not prove end-to-end connectivity. `stop` continues to remove autostart hooks as in the previous version.
+
+## Tests
+
+Run isolated regressions with `python3 tests/test_shell.py` on a machine with `sh`. They use temporary files and network/router-command stubs. Set `TEST_SHELL` to select another shell, such as BusyBox ash through a wrapper. Optionally set `TEST_CORE` to an absolute Mihomo binary path to validate generated configs with the real core in `-t` mode and run an HTTP-provider smoke test. That smoke test starts a temporary server on 127.0.0.1 and a core process without router listeners, verifies headers, refresh and raw cache preservation, then stops both. No router configuration is touched.
