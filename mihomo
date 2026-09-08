@@ -1983,6 +1983,7 @@ install_mihomo() {
 
 install_config_setup() {
     while :; do
+        ui_clear_screen
         ui_section 'CONFIG SETUP'
         printf '  1) Local config\n  2) Proxy-provider (recommended)\n  0) Back\n\nSelect [1]: '
         IFS= read -r choice || return 1
@@ -2271,6 +2272,7 @@ setup_list_menu() {
     list_name="$1"
     file="$2"
     while :; do
+        ui_clear_screen
         printf '\n%s%s%s\n' "$BOLD" "Mihomo $list_name IP/CIDR setup" "$RESET"
         show_list "$list_name list" "$file"
         printf '\n'
@@ -2319,6 +2321,7 @@ setup_mihomo() {
     ensure_dirs
     migrate_routing_list
     while :; do
+        ui_clear_screen
         route_mode="$(routing_mode)"
         printf '\n%s%s%s\n' "$BOLD" "Mihomo routing" "$RESET"
         print_message "INFO" "mode: $route_mode"
@@ -2344,6 +2347,7 @@ setup_mihomo() {
 
 routing_method_menu() {
     while :; do
+        ui_clear_screen
         printf '\n%s%s%s\n' "$BOLD" "Switch routing method" "$RESET"
         print_message "INFO" "current mode: $(routing_mode)"
         printf '  1) Include\n'
@@ -2469,6 +2473,7 @@ usage_mihomo() {
 update_menu() {
     ensure_dirs
     while :; do
+        ui_clear_screen
         printf '\n%s%s%s\n' "$BOLD" "Mihomo update" "$RESET"
         printf '  1) Update core\n'
         printf '  2) Update script\n'
@@ -2487,6 +2492,7 @@ update_menu() {
 subscription_setup_menu() {
     ensure_dirs
     while :; do
+        ui_clear_screen
         ui_section 'SUBSCRIPTION'
         subscription_mihomo show
         printf '\n  1) Import proxy-provider\n  2) Use local config\n'
@@ -2513,13 +2519,38 @@ subscription_method_menu() {
     subscription_setup_menu
 }
 
+ui_clear_screen() {
+    [ -t 1 ] || return 0
+    printf '\033[2J\033[H'
+}
+
+ui_terminal_width() {
+    columns=80
+    if [ -t 0 ] && [ -t 1 ]; then
+        columns="$(stty size 2>/dev/null | awk '{print $2}')"
+    fi
+    case "$columns" in
+        ''|*[!0-9]*) columns=80 ;;
+    esac
+    [ "$columns" -lt 60 ] && columns=60
+    [ "$columns" -gt 100 ] && columns=100
+    printf '%s\n' "$columns"
+}
+
+ui_rule() {
+    width="$(ui_terminal_width)"
+    printf '%*s\n' "$width" '' | tr ' ' '-'
+}
+
 ui_section() {
     printf '\n%s%s%s\n' "$CYAN$BOLD" "$1" "$RESET"
-    printf '%s\n' '------------------------------------------------------------'
+    printf '%s' "$CYAN"
+    ui_rule
+    printf '%s' "$RESET"
 }
 
 ui_row() {
-    printf '  %-15s %s\n' "$1" "$2"
+    printf '  %s%-18s%s %s\n' "$GRAY" "$1" "$RESET" "$2"
 }
 
 console_dashboard() {
@@ -2568,6 +2599,7 @@ console_dashboard() {
 
 main_menu() {
     while :; do
+        ui_clear_screen
         console_dashboard
         ui_section 'ACTIONS'
         printf '  1) Status\n'
@@ -2583,15 +2615,15 @@ main_menu() {
         printf '\nSelect option: '
         IFS= read -r choice || return 0
         case "$choice" in
-            1) status_mihomo; pause_enter ;;
-            2) start_mihomo; pause_enter ;;
-            3) stop_mihomo; sleep 2; start_mihomo; pause_enter ;;
-            4) stop_mihomo; pause_enter ;;
+            1) ui_clear_screen; status_mihomo; pause_enter ;;
+            2) ui_clear_screen; start_mihomo; pause_enter ;;
+            3) ui_clear_screen; stop_mihomo; sleep 2; start_mihomo; pause_enter ;;
+            4) ui_clear_screen; stop_mihomo; pause_enter ;;
             5) update_menu ;;
             6) subscription_setup_menu ;;
             7) setup_mihomo ;;
-            8) log_mihomo ;;
-            9) usage_mihomo; pause_enter ;;
+            8) ui_clear_screen; log_mihomo ;;
+            9) ui_clear_screen; usage_mihomo; pause_enter ;;
             0) exit 0 ;;
             *) print_message "WARN" "unknown option" ;;
         esac
